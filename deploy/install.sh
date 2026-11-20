@@ -176,10 +176,10 @@ fi
 
 if "$systemd"; then
     panel_ready() {
-        local try
+        local try port=${1:-5100}
         for ((try=0; try<12; try++)); do
             if systemctl --user is-active --quiet localmodelhub.service &&
-                curl --disable --noproxy '*' -fsS --max-time 1 http://127.0.0.1:5189/api/health |
+                curl --disable --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$port/api/health" |
                 grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
                 return 0
             fi
@@ -189,6 +189,7 @@ if "$systemd"; then
     }
 
     restore_release() {
+        local restored_port=5100
         if [[ "$previous_release" =~ ^releases/[a-f0-9]{64}-py[0-9]+\.[0-9]+$ ]] &&
             [[ -f "$data/$previous_release/.ready" ]]; then
             for name in "${units[@]}"; do
@@ -201,7 +202,10 @@ if "$systemd"; then
             ln -s -- "$previous_release" "$scratch/previous-current"
             mv -Tf -- "$scratch/previous-current" "$data/current"
             systemctl --user daemon-reload
-            if systemctl --user restart localmodelhub.service && panel_ready; then
+            if [[ -f "$unit" ]] && grep -Eq -- '--port[[:space:]]+5189([[:space:]]|$)' "$unit"; then
+                restored_port=5189
+            fi
+            if systemctl --user restart localmodelhub.service && panel_ready "$restored_port"; then
                 printf '%s\n' "${previous_release##*/}" > "$data/.systemd-release"
                 die "new release failed to become healthy; previous release restored"
             fi

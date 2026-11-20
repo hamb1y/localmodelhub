@@ -6,7 +6,7 @@ Type=simple
 WorkingDirectory=%h
 Environment=HF_XET_CACHE=%h/.local/share/localmodelhub/state/hf-xet
 EnvironmentFile=-%h/.config/localmodelhub/service.env
-ExecStart=%h/.local/share/localmodelhub/current/venv/bin/lmh-server --catalog %h/.config/localmodelhub/models.json --state-dir %h/.local/share/localmodelhub/state --ui-dir %h/.local/share/localmodelhub/current/web/build --host 127.0.0.1 --port 5189 --policy %h/.config/localmodelhub/policy.json
+ExecStart=%h/.local/share/localmodelhub/current/venv/bin/lmh-server --catalog %h/.config/localmodelhub/models.json --state-dir %h/.local/share/localmodelhub/state --ui-dir %h/.local/share/localmodelhub/current/web/build --host 127.0.0.1 --port 5100 --inference-port 5101 --webhook-port 5102 --policy %h/.config/localmodelhub/policy.json
 Restart=on-failure
 RestartSec=5s
 UMask=0077

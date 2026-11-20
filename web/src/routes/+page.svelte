@@ -247,7 +247,7 @@
             {@const item = views[id]}
             <a {id} href={`#${id}`} aria-current={id === current ? 'page' : undefined} class={[
               'flex items-center gap-2 rounded-lg border px-2.5 py-2 text-xs font-medium transition-colors lg:mb-1 lg:gap-2.5 lg:text-sm',
-              id === current ? 'border-accent/13 bg-accent/10 text-accent' : 'border-transparent text-muted hover:bg-hover hover:text-foreground'
+              id === current ? 'border-accent bg-accent/55 text-foreground' : 'border-transparent text-muted hover:bg-hover hover:text-foreground'
             ]}>
               <item.icon size={16} strokeWidth={1.8} /> {item.label}
             </a>
@@ -311,7 +311,7 @@
             {#if status.boot.message}<p class="w-full wrap-anywhere text-faint">{status.boot.message}</p>{/if}
           {/if}
         </div>
-        <Models models={status?.models ?? []} ready={!!status} locked={commandPending || !!statusError || bootLocked} loading={statusLoading && !statusError} hasActive={!!activeCount} onAction={submitAction} onSwitch={openSwitch} onLogs={openLogs} onImport={openCatalog} />
+        <Models models={status?.models ?? []} ready={!!status} locked={commandPending || !!statusError || bootLocked} loading={statusLoading && !statusError} hasActive={!!activeCount} inferenceUrl={status?.inference_url} onAction={submitAction} onSwitch={openSwitch} onLogs={openLogs} onImport={openCatalog} />
       {:else if current === 'activity'}
         <Activity jobs={status?.jobs ?? []} models={status?.models ?? []} ready={!!status} />
       {:else if current === 'stats'}

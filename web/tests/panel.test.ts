@@ -16,7 +16,8 @@ test('static panel uses explicit, separate lifecycle and catalog operations', as
     hardware: { cpu: 'Fixture CPU', ram_available_bytes: 4096, ram_total_bytes: 8192, gpus: [
       { id: 'test-gpu', name: 'Fixture GPU', total_bytes: 8192, free_bytes: 1000 }
     ] },
-    boot: { state: 'complete', message: 'Reconciled' }
+    boot: { state: 'complete', message: 'Reconciled' },
+    inference_url: 'http://127.0.0.1:5101/v1'
   };
   const actions: Action[] = [];
   const stages: unknown[] = [];
@@ -72,14 +73,23 @@ test('static panel uses explicit, separate lifecycle and catalog operations', as
     }
   });
   try {
-    const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? Bun.which('chromium') ?? undefined, args: ['--no-sandbox'] });
+    const browser = await chromium.launch({
+      executablePath: process.env.CHROMIUM ?? Bun.which('chromium') ?? undefined,
+      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+      timeout: 12_000
+    });
     try {
       const page = await browser.newPage({ viewport: { width: 360, height: 740 } });
       page.setDefaultTimeout(4000);
       const errors: Error[] = [];
       page.on('pageerror', (error) => errors.push(error));
       await page.goto(server.url.toString());
+      expect(await page.locator('body').evaluate((node) => getComputedStyle(node).backgroundColor)).toBe('rgb(0, 0, 0)');
+      expect(await page.locator('body').evaluate((node) => getComputedStyle(node).fontFamily)).toContain('Agave Nerd Font');
+      expect(await page.evaluate(async () => (await document.fonts.load('400 16px "Agave Nerd Font"'))[0]?.status)).toBe('loaded');
       await page.getByText('text → text', { exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Copy API URL for Alice / gpu' }).click();
+      await page.getByRole('status').filter({ hasText: 'http://127.0.0.1:5101/v1' }).waitFor();
       await page.getByRole('button', { name: 'Start Bob / cpu' }).click();
       await page.getByText('Start requested for Bob / cpu.', { exact: false }).waitFor();
       expect(actions).toEqual([{ action: 'start', model: 'bob', profile: 'cpu' }]);
@@ -150,4 +160,4 @@ test('static panel uses explicit, separate lifecycle and catalog operations', as
   } finally {
     server.stop(true);
   }
-}, 20000);
+}, 40000);

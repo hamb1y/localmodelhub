@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+LLAMA_ENGINE_PORT = 18080
 
 @dataclass(frozen=True)
 class Launch:
@@ -426,7 +427,7 @@ def build_launch(
     options = {**runtime_opts, **profile_opts}
     gpu = _device(profile, gpu_id)
     default_port, default_probe = {
-        "llama.cpp": (8080, "/health"),
+        "llama.cpp": (LLAMA_ENGINE_PORT, "/health"),
         "stable-diffusion.cpp": (1234, "/v1/models"),
         "native": (None, None),
     }[adapter]

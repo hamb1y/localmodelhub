@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .artifacts import ArtifactStore, ArtifactUnavailable
 from .catalog import CatalogError, load_catalog, validate_catalog
-from .engines import build_launch
+from .engines import LLAMA_ENGINE_PORT, build_launch
 from .hardware import snapshot
 from .state import State
 from .supervisor import Supervisor
@@ -60,7 +60,7 @@ def _check_config(config: dict, *, portable: bool = False) -> dict:
             try:
                 runtime = config["runtimes"][profile["runtime"]]
                 if runtime["adapter"] in {"llama.cpp", "stable-diffusion.cpp"}:
-                    profile.setdefault("port", 8080 if runtime["adapter"] == "llama.cpp" else 1234)
+                    profile.setdefault("port", LLAMA_ENGINE_PORT if runtime["adapter"] == "llama.cpp" else 1234)
                     probe = "/health" if runtime["adapter"] == "llama.cpp" else "/v1/models"
                     if isinstance(profile.setdefault("health", {}), dict):
                         profile["health"].setdefault("path", probe)
@@ -609,7 +609,7 @@ class Controller:
             maintenance.close()
             self.jobs.task_done()
 
-    def inference_target(self, model: str, *, exclude_port=None) -> tuple[str, int] | None:
+    def inference_target(self, model: str, *, exclude_ports=()) -> tuple[str, int] | None:
         """Find a ready loopback engine without changing lifecycle state."""
         if not self.config_valid or self.boot["state"] != "complete":
             return None
@@ -622,7 +622,7 @@ class Controller:
             profile = profiles[name]
             host = profile.get("host", "127.0.0.1")
             port = profile.get("port")
-            if host not in {"localhost", "127.0.0.1", "::1"} or not port or port == exclude_port:
+            if host not in {"localhost", "127.0.0.1", "::1"} or not port or port in exclude_ports:
                 continue
             try:
                 if self._observe((model, name))["state"] == "running" and self.ready(self._url(profile)):

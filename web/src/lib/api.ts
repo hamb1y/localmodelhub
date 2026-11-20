@@ -30,7 +30,7 @@ export type Stats = {
 } & Record<string, unknown>;
 export type Status = {
   models: Model[]; jobs: Job[]; hardware: Hardware; boot: { state: string; message?: string | null };
-  stats?: Stats; catalog_staged?: boolean;
+  stats?: Stats; catalog_staged?: boolean; inference_url?: string;
 };
 export type Target = { model: string; profile: string };
 export type Action =

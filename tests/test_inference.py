@@ -1,3 +1,4 @@
+import hashlib
 import http.client
 import json
 import tempfile
@@ -97,7 +98,8 @@ class InferenceTests(unittest.TestCase):
         self.controller = Controller(catalog, self.home / "state", driver=self.driver, boot_reader=lambda: "test-boot")
         self.controller.reconcile()
         self.assertEqual(self.controller.boot["state"], "complete")
-        self.gateway = self.spawn(make_server(self.controller, port=0))
+        self.gateway = self.spawn(make_server(self.controller, port=0, role="inference"))
+        self.panel = self.spawn(make_server(self.controller, port=0, role="panel"))
 
     def request(self, path, data=None, *, gateway=None, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", (gateway or self.gateway).server_port, timeout=4)
@@ -171,20 +173,23 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(self.request("/v1/chat/completions", self.chat("decision", response_format={
             "type": "json_schema", "json_schema": {"strict": True, "schema": {}},
         }))[0], 200)
-        status, stats = self.request("/api/stats?model=chat")
+        status, stats = self.request("/api/stats?model=chat", gateway=self.panel)
         self.assertEqual(status, 200)
         self.assertEqual(stats["language_by_model"], [
             {"model": "chat", "mild": 1, "strong": 1, "slurs": 0, "responses": 2, "truncated": 0},
         ])
-        self.assertEqual(len(self.request("/api/stats")[1]["language_by_model"]), 2)
-        self.assertEqual(self.request("/api/stats?model=missing")[0], 404)
+        self.assertEqual(len(self.request("/api/stats", gateway=self.panel)[1]["language_by_model"]), 2)
+        self.assertEqual(self.request("/api/stats?model=missing", gateway=self.panel)[0], 404)
+        self.assertEqual(self.request("/api/stats?model=chat")[0], 404)
         self.assertFalse((self.home / "state" / "inference-logs").exists())
         self.assertNotIn(b"private prompt", self.controller.state.db.read_bytes())
 
     def test_content_capture_is_opt_in_and_does_not_include_credentials(self):
         directory = self.home / "state" / "inference-logs"
         key = "private-control-credential"
-        secured = self.spawn(make_server(self.controller, port=0, api_token=key, inference_log_dir=directory))
+        secured = self.spawn(make_server(
+            self.controller, port=0, role="inference", inference_log_dir=directory,
+            inference_keys={"test": hashlib.sha256(key.encode()).hexdigest()}))
         self.assertEqual(self.request("/v1/models", gateway=secured)[0], 401)
         self.assertFalse(directory.exists())
         status, body = self.request("/v1/chat/completions", self.chat(), gateway=secured,
@@ -200,7 +205,7 @@ class InferenceTests(unittest.TestCase):
 
     def test_content_capture_preserves_multipart_bytes_and_sse(self):
         directory = self.home / "state" / "inference-logs"
-        logged = self.spawn(make_server(self.controller, port=0, inference_log_dir=directory))
+        logged = self.spawn(make_server(self.controller, port=0, role="inference", inference_log_dir=directory))
         raw, media = encode_upload([("file", "test.wav", "audio/wav", b"\x00\xfe\xff")], "audio")
         self.assertEqual(self.request("/v1/audio/transcriptions", raw, gateway=logged,
                                       headers={"Content-Type": media})[0], 200)
@@ -218,6 +223,27 @@ class InferenceTests(unittest.TestCase):
         self.assertIsNone(self.engine.last_request)
         body["messages"][0]["content"][0]["image_url"]["url"] = "data:image/png;base64,AA=="
         self.assertEqual(self.request("/v1/chat/completions", body)[1]["error"]["code"], "unsupported_model_io")
+
+    def test_cloudflare_hostname_is_scoped_and_revocable(self):
+        host = "models.example.net"
+        key = "inference-key"
+        digest = hashlib.sha256(key.encode()).hexdigest()
+        origin = self.spawn(make_server(self.controller, port=0, role="inference",
+                                        public_hostname=host, inference_keys={"laptop": digest}))
+        for headers, expected in [
+            ({"Host": host}, 401),
+            ({"Host": host, "Authorization": "Bearer operator-key"}, 401),
+            ({"Host": host, "Authorization": f"Bearer {key}"}, 200),
+            ({"Host": "other.example.net", "Authorization": f"Bearer {key}"}, 403),
+        ]:
+            self.assertEqual(self.request("/v1/models", gateway=origin, headers=headers)[0], expected)
+        self.assertEqual(self.request("/api/status", gateway=origin,
+                                      headers={"Host": host, "Authorization": f"Bearer {key}"})[0], 404)
+        self.assertEqual(self.request("/api/status", gateway=self.panel, headers={"Host": host})[0], 403)
+        revoked = self.spawn(make_server(self.controller, port=0, role="inference",
+                                         public_hostname=host, inference_keys={}))
+        self.assertEqual(self.request("/v1/models", gateway=revoked,
+                                      headers={"Host": host, "Authorization": f"Bearer {key}"})[0], 401)
 
 
 class LanguageTests(unittest.TestCase):

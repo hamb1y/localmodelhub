@@ -5,8 +5,9 @@
   import Badge from './ui/badge.svelte';
   import Button from './ui/button.svelte';
 
-  let { models, ready, locked, loading, hasActive, onAction, onSwitch, onLogs, onImport }: {
+  let { models, ready, locked, loading, hasActive, inferenceUrl, onAction, onSwitch, onLogs, onImport }: {
     models: Model[]; ready: boolean; locked: boolean; loading: boolean; hasActive: boolean;
+    inferenceUrl?: string;
     onAction: (action: Action) => void; onSwitch: (target: Target) => void;
     onLogs: (target: Target) => void; onImport: () => void;
   } = $props();
@@ -14,9 +15,8 @@
   let query = $state('');
   let onlyRunning = $state(false);
   let copyResult = $state('');
-  async function copyEndpoint(host: string, port: number) {
-    const address = host === '0.0.0.0' ? '127.0.0.1' : host === '::' ? '::1' : host;
-    const url = `http://${address.includes(':') ? `[${address}]` : address}:${port}`;
+  async function copyEndpoint() {
+    const url = inferenceUrl ?? 'http://127.0.0.1:5101/v1';
     try {
       await navigator.clipboard.writeText(url);
       copyResult = `Copied ${url}`;
@@ -88,14 +88,13 @@
               </div>
               <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
                 <span class="inline-flex items-center gap-1.5 wrap-anywhere"><Cpu size={13} class="shrink-0 text-faint" /> {profile.device}</span>
-                {#if profile.port}<span class="font-mono text-[11px]">Port {profile.port}</span>{/if}
                 {#if profile.message}<span class="wrap-anywhere text-faint">{profile.message}</span>{/if}
               </div>
             </div>
             <div class="flex flex-wrap items-center gap-1.5">
                <Button size="sm" variant="ghost" aria-label={`Logs for ${model.name} / ${profile.id}`} onclick={() => onLogs(target)}><Terminal /> Logs</Button>
-               {#if profile.port && isRunning(profile.state)}
-                 <Button size="sm" variant="ghost" aria-label={`Copy endpoint for ${model.name} / ${profile.id}`} onclick={() => copyEndpoint(profile.host ?? '127.0.0.1', profile.port!)}><Copy /> Endpoint</Button>
+               {#if profile.state === 'ready'}
+                 <Button size="sm" variant="ghost" aria-label={`Copy API URL for ${model.name} / ${profile.id}`} onclick={copyEndpoint}><Copy /> API URL</Button>
                {/if}
                {#if profile.controllable === false}
                  <span class="px-2 text-xs text-faint">Read-only · runtime not approved for control</span>

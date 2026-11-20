@@ -90,7 +90,11 @@ jobs:
           bash deploy/build-release.sh --build-ui --terminal-dir terminal-bins
           cd web
           npm run check
-          bun x --no-install playwright-core install --with-deps chromium
+          if command -v google-chrome >/dev/null; then
+            export CHROMIUM="$(command -v google-chrome)"
+          else
+            bun x --no-install playwright-core install chromium
+          fi
           bun test
       - name: Check release tag and checksum
         if: github.ref_type == 'tag'

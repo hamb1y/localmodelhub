@@ -42,6 +42,13 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("hf-login")
     uninstall = commands.add_parser("uninstall")
     uninstall.add_argument("--purge", action="store_true")
+    keys = commands.add_parser("api-key").add_subparsers(dest="action", required=True)
+    keys.add_parser("list")
+    keys.add_parser("create").add_argument("value")
+    keys.add_parser("revoke").add_argument("value")
+    cloudflare = commands.add_parser("cloudflare").add_subparsers(dest="action", required=True)
+    cloudflare.add_parser("setup").add_argument("value")
+    cloudflare.add_parser("disable")
     args = parser.parse_args(argv)
     if pwd.getpwuid(os.geteuid()).pw_name != "ai":
         parser.error("run LocalModelHub administration as the ai user")
@@ -55,6 +62,15 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyboardInterrupt, EOFError):
             print("\nSign-in cancelled.", file=sys.stderr)
             return 130
+    if args.command in {"api-key", "cloudflare"}:
+        from .access import configure
+
+        try:
+            configure(args.command, args.action, getattr(args, "value", None))
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"LocalModelHub: {exc}", file=sys.stderr)
+            return 1
+        return 0
     script = Path(sys.prefix).parent / "uninstall.sh"
     if not script.is_file():
         print("Uninstaller is available only from an installed LocalModelHub release.", file=sys.stderr)

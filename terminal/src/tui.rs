@@ -29,10 +29,10 @@ use serde_json::Value;
 
 use crate::api::{Client, Profile, Status};
 
-const GREEN: Color = Color::Rgb(104, 237, 156);
-const MUTED: Color = Color::Rgb(155, 181, 168);
-const EDGE: Color = Color::Rgb(74, 113, 95);
-const SELECTED: Color = Color::Rgb(32, 66, 50);
+const GREEN: Color = Color::Rgb(44, 105, 67);
+const MUTED: Color = Color::Rgb(183, 183, 183);
+const EDGE: Color = Color::Rgb(38, 67, 49);
+const SELECTED: Color = Color::Rgb(34, 90, 56);
 const REFRESH: Duration = Duration::from_secs(3);
 const INPUT_TICK: Duration = Duration::from_millis(100);
 
@@ -71,7 +71,9 @@ fn ctrl_c(key: KeyEvent) -> bool {
 }
 
 fn accent() -> Style {
-    Style::default().fg(GREEN).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn muted() -> Style {
@@ -79,12 +81,13 @@ fn muted() -> Style {
 }
 
 fn selected() -> Style {
-    Style::default().bg(SELECTED).fg(GREEN)
+    Style::default().bg(SELECTED).fg(Color::White)
 }
 
 fn panel(title: impl Into<Line<'static>>) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
+        .style(Style::default().bg(Color::Black).fg(Color::White))
         .border_style(Style::default().fg(EDGE))
         .title(title.into().style(accent()))
 }
@@ -611,6 +614,10 @@ pub fn run(client: Client) -> Result<()> {
 }
 
 fn draw_manager(frame: &mut Frame<'_>, app: &mut App) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Black).fg(Color::White)),
+        frame.area(),
+    );
     let [header, nav, body, detail, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
@@ -1099,6 +1106,10 @@ fn stage_name(stage: &str) -> &str {
 }
 
 fn draw_onboarding(frame: &mut Frame<'_>, stages: &[Progress], elapsed: Duration) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Black).fg(Color::White)),
+        frame.area(),
+    );
     let bounds = frame.area();
     let area = popup(bounds, 88, 22);
     let block = panel(" LOCALMODELHUB / FIRST RUN ").border_style(Style::default().fg(GREEN));

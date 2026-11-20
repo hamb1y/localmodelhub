@@ -15,13 +15,14 @@ from http.client import HTTPConnection, HTTPException
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .api import _credential
+from .api import INFERENCE_PORT, PANEL_PORT, _credential
 from .catalog import load_catalog
 from .controller import MIB, _catalog_digest, _check_config
 from .runtime_install import _read_policy, install_cpu_runtime
 
 
-DASHBOARD = "http://127.0.0.1:5189"
+DASHBOARD = f"http://127.0.0.1:{PANEL_PORT}"
+INFERENCE = f"http://127.0.0.1:{INFERENCE_PORT}"
 MODEL = "qwen2.5-chat"
 PROFILE = "cpu"
 SERVICE = "localmodelhub.service"
@@ -39,7 +40,7 @@ class BackendError(Exception):
 
 
 def _local_address(endpoint: str) -> tuple[str, int]:
-    message = "LMH_ENDPOINT must be a plain HTTP loopback URL, without credentials, a path, query, or fragment."
+    message = "Use a plain HTTP loopback URL, without credentials, a path, query, or fragment."
     try:
         address = urlsplit(endpoint)
         port = address.port
@@ -283,6 +284,8 @@ def onboard(emit) -> int:
         local_address = _local_address(dashboard)
         dashboard = dashboard.rstrip("/")
         alternate_port = local_address != _local_address(DASHBOARD)
+        inference_endpoint = (os.environ.get("LMH_INFERENCE_ENDPOINT") or INFERENCE).rstrip("/")
+        _local_address(inference_endpoint)
         stage = "account"
         home = _ai_home(isolated=alternate_port)
         data = home / ".local/share/localmodelhub"
@@ -360,8 +363,10 @@ def onboard(emit) -> int:
         stage = "smoke"
         emit(stage, "working", "Checking a local chat completion.")
         try:
-            inference = _smoke(dashboard, token)
+            inference = _smoke(inference_endpoint, os.environ.get("LMH_INFERENCE_KEY") or None)
         except (BackendError, RuntimeError, TypeError, AttributeError, IndexError) as exc:
+            if isinstance(exc, BackendError) and exc.status == 401:
+                raise RuntimeError("Inference keys are enabled; set LMH_INFERENCE_KEY to verify the starter.") from None
             raise RuntimeError(f"Chat smoke test failed: {exc}; {START_HINT}.") from None
         emit(stage, "ok", "Local chat completion succeeded.")
         emit("done", "ok", "LocalModelHub is ready.", dashboard=dashboard, inference=inference)

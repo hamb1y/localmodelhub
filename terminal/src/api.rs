@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
-pub const DEFAULT_ENDPOINT: &str = "http://localhost:5189";
+pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:5100";
 
 #[derive(Clone)]
 pub struct Client {

@@ -160,6 +160,7 @@ runner=()
 if [[ $EUID != "$ai_uid" ]]; then
     runner=(sudo -H -u ai)
     [[ -z ${LMH_API_TOKEN:-} ]] || runner+=(--preserve-env=LMH_API_TOKEN)
+    [[ -z ${LMH_INFERENCE_KEY:-} ]] || runner+=(--preserve-env=LMH_INFERENCE_KEY)
     runner+=(--)
 fi
 command=(/usr/bin/env PATH="$PATH" HOME="$ai_home" XDG_RUNTIME_DIR="/run/user/$ai_uid"
@@ -187,8 +188,11 @@ fi
 LAUNCHER
 fi
 
-if [[ $EUID != "$ai_uid" && -n ${LMH_API_TOKEN:-} ]]; then
-    runner=(sudo -H -u ai --preserve-env=LMH_API_TOKEN --)
+if [[ $EUID != "$ai_uid" ]]; then
+    runner=(sudo -H -u ai)
+    [[ -z ${LMH_API_TOKEN:-} ]] || runner+=(--preserve-env=LMH_API_TOKEN)
+    [[ -z ${LMH_INFERENCE_KEY:-} ]] || runner+=(--preserve-env=LMH_INFERENCE_KEY)
+    runner+=(--)
 fi
 onboard=("${runner[@]}" /usr/bin/env PATH="$PATH" HOME="$ai_home"
          XDG_RUNTIME_DIR="/run/user/$ai_uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$ai_uid/bus"

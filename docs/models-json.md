@@ -135,7 +135,7 @@ for its embedding mode. See the starter for a diffusion profile.
 
 | Optional profile keys | Purpose |
 | --- | --- |
-| `host`, `port` | Engine bind address and port. Use `127.0.0.1` or `::1`; clients only need the unified port. Default engine ports are `8080` for llama.cpp and `1234` for stable-diffusion.cpp. |
+| `host`, `port` | Internal engine bind address and port. Use `127.0.0.1` or `::1`. Clients only need the shared inference port, `5101`. |
 | `gpu` | CUDA UUID or ordinal as a string, GPU profiles only. |
 | `ram_mib`, `vram_mib` | Resource estimates for safe coexistence; `vram_mib` is GPU-only. |
 | `options` | Typed profile-specific runtime settings. |
@@ -146,10 +146,11 @@ for its embedding mode. See the starter for a diffusion profile.
 
 ## Unified inference
 
-Set your OpenAI client's base URL to `http://127.0.0.1:5189/v1`, then use the
-model ID from `models.json`. If `api_token` is set in local policy, use it as
-the client API key. Otherwise, use a placeholder like `local` if your SDK
-requires a key. `GET /v1/models` lists ready models, with their declared `io`.
+Set your OpenAI client's base URL to `http://127.0.0.1:5101/v1`, then use the
+model ID from `models.json`. If inference keys are enabled, use a key
+generated with `lmh api-key create NAME`. Otherwise, use a placeholder like
+`local` if your SDK requires a key. `GET /v1/models` lists ready models,
+with their declared `io`.
 LocalModelHub prefers a ready default profile, otherwise a ready profile in ID
 order. It never starts or switches models in response to inference requests.
 
@@ -168,7 +169,7 @@ size limits. A known but unavailable model returns an error instead of being
 started automatically.
 
 ```bash
-curl -fsS http://127.0.0.1:5189/v1/chat/completions \
+curl -fsS http://127.0.0.1:5101/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen2.5-chat","messages":[{"role":"user","content":"Say hello."}]}'
 ```

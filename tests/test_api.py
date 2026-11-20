@@ -182,11 +182,12 @@ class APITest(unittest.TestCase):
         switch = {**ACTION, "action": "switch", "from_model": "n", "from_profile": "q"}
         with self.assertRaises(ValueError):
             make_server(controller, port=0, api_token="hook-secret", webhooks=scopes)
-        with running_server(controller, api_token="operator-secret", webhooks=scopes) as port:
+        with running_server(controller, api_token="operator-secret", webhooks=scopes, role="webhook") as port:
             self.assertEqual(request(port, "POST", WEBHOOK, ACTION)[0], 401)
             self.assertEqual(request(port, "POST", WEBHOOK, ACTION, bearer("operator-secret"))[0], 401)
-            self.assertEqual(request(port, "POST", ACTIONS, ACTION, hook)[0], 401)
-            self.assertEqual(request(port, "POST", STAGE, {"catalog": CATALOG}, hook)[0], 401)
+            self.assertEqual(request(port, "POST", ACTIONS, ACTION, hook)[0], 404)
+            self.assertEqual(request(port, "POST", STAGE, {"catalog": CATALOG}, hook)[0], 404)
+            self.assertEqual(request(port, "GET", "/v1/models", headers=hook)[0], 404)
             for body in (
                 {**ACTION, "action": "stop"},
                 {**ACTION, "model": "other"},
@@ -198,6 +199,10 @@ class APITest(unittest.TestCase):
                     self.assertEqual(request(port, "POST", WEBHOOK, body, hook)[0], 403)
             self.assertEqual(controller.submissions, [])
             self.assertEqual(request(port, "POST", WEBHOOK, switch, hook)[0], 202)
+        with running_server(controller, api_token="operator-secret") as port:
+            self.assertEqual(request(port, "POST", WEBHOOK, ACTION, hook)[0], 404)
+            self.assertEqual(request(port, "GET", "/v1/models")[0], 404)
+            self.assertEqual(request(port, "POST", ACTIONS, ACTION, hook)[0], 401)
         self.assertEqual(controller.submissions, [("switch", "m", "p", "n", "q", "scheduler")])
 
     def test_json_validation_and_size_limits_apply_before_submission(self):

@@ -286,7 +286,7 @@ class EngineTests(unittest.TestCase):
                     "device": "cpu", "host": host,
                     "health": {"path": "/ready", "timeout_seconds": 42},
                 }, MODEL)
-                self.assertEqual(launch.health_url, f"http://{expected}:8080/ready")
+                self.assertEqual(launch.health_url, f"http://{expected}:18080/ready")
                 self.assertEqual(launch.health_timeout, 42.0)
 
     def test_invalid_probe_options(self):

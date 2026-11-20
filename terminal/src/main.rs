@@ -39,6 +39,16 @@ enum Command {
     Onboard,
     /// Optionally save a Hugging Face token for gated or private models.
     HfLogin,
+    /// Create, list, or revoke inference-only API keys.
+    ApiKey {
+        #[command(subcommand)]
+        action: KeyAction,
+    },
+    /// Allow the inference listener to serve a Cloudflare Tunnel hostname.
+    Cloudflare {
+        #[command(subcommand)]
+        action: CloudflareAction,
+    },
     /// List registered model profiles.
     List,
     /// Request an additive start; does not stop other profiles.
@@ -80,6 +90,24 @@ enum Command {
         #[arg(long)]
         purge: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum KeyAction {
+    /// Generate a key and display it once.
+    Create { name: String },
+    /// List key names, not secrets.
+    List,
+    /// Revoke a named key.
+    Revoke { name: String },
+}
+
+#[derive(Subcommand)]
+enum CloudflareAction {
+    /// Allow a hostname and print the Cloudflare Tunnel settings.
+    Setup { hostname: String },
+    /// Disable public hostname access at the origin.
+    Disable,
 }
 
 #[derive(Args)]
@@ -125,6 +153,21 @@ fn run(cli: Cli) -> Result<()> {
         Command::Uninstall { purge: false } => return local_admin(&["uninstall"]),
         Command::Uninstall { purge: true } => return local_admin(&["uninstall", "--purge"]),
         Command::HfLogin => return local_admin(&["hf-login"]),
+        Command::ApiKey { action } => {
+            return match action {
+                KeyAction::Create { name } => local_admin(&["api-key", "create", &name]),
+                KeyAction::List => local_admin(&["api-key", "list"]),
+                KeyAction::Revoke { name } => local_admin(&["api-key", "revoke", &name]),
+            };
+        }
+        Command::Cloudflare { action } => {
+            return match action {
+                CloudflareAction::Setup { hostname } => {
+                    local_admin(&["cloudflare", "setup", &hostname])
+                }
+                CloudflareAction::Disable => local_admin(&["cloudflare", "disable"]),
+            };
+        }
         Command::Tui if !interactive() => {
             bail!("The terminal panel requires a TTY. Use `lmh list` or see `lmh --help`.");
         }
@@ -205,7 +248,12 @@ fn run(cli: Cli) -> Result<()> {
             );
             Ok(())
         }
-        Command::Onboard | Command::HfLogin | Command::Update | Command::Uninstall { .. } => {
+        Command::Onboard
+        | Command::HfLogin
+        | Command::Update
+        | Command::Uninstall { .. }
+        | Command::ApiKey { .. }
+        | Command::Cloudflare { .. } => {
             unreachable!("local commands are handled before connecting")
         }
     }

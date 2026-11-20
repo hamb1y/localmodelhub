@@ -1,5 +1,6 @@
 """Local control panel HTTP API and read-only catalog previews."""
 
+import hashlib
 import hmac
 import http.client
 import ipaddress
@@ -24,6 +25,8 @@ from lmh.inference_log import InferenceLog
 
 
 _ACTIONS = {"start", "stop", "switch"}
+PANEL_PORT, INFERENCE_PORT, WEBHOOK_PORT = 5100, 5101, 5102
+WEBHOOK_PATH = "/api/webhooks/action"
 _ACTION_LIMIT = 16 * 1024
 _CATALOG_LIMIT = 1024 * 1024
 _TIMEOUT = 8
@@ -303,13 +306,39 @@ def _webhook_config(webhooks, api_token):
     return scopes
 
 
+def inference_hostname(value):
+    if not isinstance(value, str) or "." not in value or not _dns_name(value):
+        raise ValueError("Use a public hostname without a protocol, port, or path.")
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return value.lower()
+    raise ValueError("Use a public hostname, not an IP address.")
+
+
+def inference_policy(keys, hostname):
+    if keys is not None and (not isinstance(keys, dict) or len(keys) > 128 or any(
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name)
+        or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        for name, digest in keys.items()
+    )):
+        raise ValueError("inference_keys must map key names to SHA-256 digests (use lmh api-key).")
+    return (tuple(keys.values()) if keys is not None else None,
+            inference_hostname(hostname) if hostname is not None else None)
+
+
 class _Server(ThreadingHTTPServer):
-    def __init__(self, address, controller, local, ui_dir, api_token, webhooks, inference_log_dir):
+    def __init__(self, address, controller, local, ui_dir, api_token, webhooks, inference_log_dir,
+                 role, inference_config):
         self.controller = controller
         self.local = local
         self.ui_dir = ui_dir
         self.api_token = api_token
         self.webhooks = webhooks
+        self.role = role
+        self.inference_keys, self.public_hostname = inference_config
+        self.listener_ports = None
+        self.inference_url = None
         self.inference_log_dir = inference_log_dir
         self.inference_log_warned = threading.Event()
         self._slots = threading.BoundedSemaphore(32)
@@ -367,8 +396,13 @@ class _Handler(BaseHTTPRequestHandler):
             if not self.path.startswith("/") or "#" in self.path:
                 raise _HTTPError(400, "invalid request target")
             path, _, query = self.path.partition("?")
-            if is_inference:
+            role = self.server.role
+            if role == "webhook" and path == WEBHOOK_PATH and self.command == "POST" and not query:
+                self._submit(self._webhook_auth())
+            elif role == "inference" and is_inference:
                 self._inference(path, query)
+            elif role != "panel" or is_inference or path == WEBHOOK_PATH:
+                raise _HTTPError(404, "not found")
             elif path == "/api" or path.startswith("/api/"):
                 self._api(path, query)
             elif self.command in {"GET", "HEAD"}:
@@ -396,12 +430,13 @@ class _Handler(BaseHTTPRequestHandler):
             authority = _authority(values[0])
         except ValueError as error:
             raise _HTTPError(400, "invalid Host header") from error
-        if self.server.local and (
-            not _loopback(authority[0])
-            or authority[1] != self.server.server_port
-            or not _loopback(self.client_address[0])
-        ):
-            raise _HTTPError(403, "Host must match the local panel")
+        if self.server.local:
+            local_authority = _loopback(authority[0]) and authority[1] == self.server.server_port
+            public_authority = (self.server.role == "inference" and self.server.public_hostname
+                                and authority[0] == self.server.public_hostname
+                                and authority[1] in {80, 443})
+            if not _loopback(self.client_address[0]) or not (local_authority or public_authority):
+                raise _HTTPError(403, "Host must match the local listener or configured inference hostname")
         return authority
 
     def _check_origin(self, authority):
@@ -416,7 +451,9 @@ class _Handler(BaseHTTPRequestHandler):
                 raise ValueError
             if origins[0].startswith("http://"):
                 allowed = _authority(origins[0][7:]) == authority
-            elif origins[0].startswith("https://") and self.server.api_token is not None:
+            elif origins[0].startswith("https://") and (
+                self.server.api_token is not None or authority[0] == self.server.public_hostname
+            ):
                 # Authenticated deployments may terminate TLS in a proxy that
                 # preserves Host. Do not trust client-supplied forwarding headers.
                 allowed = _authority(origins[0][8:], 443) == _authority(self.headers["Host"], 443)
@@ -458,11 +495,15 @@ class _Handler(BaseHTTPRequestHandler):
         return matched
 
     def _inference(self, path, query):
-        if self.server.api_token is not None:
-            self._normal_auth()
-        else:
-            # OpenAI clients require an API key even for unauthenticated local servers.
-            self._bearer()
+        token = self._bearer()
+        keys = self.server.inference_keys
+        if self.server.public_hostname is not None or keys is not None:
+            digest = hashlib.sha256(token.encode("ascii")).hexdigest() if token is not None else ""
+            valid = False
+            for expected in keys or ():
+                valid |= hmac.compare_digest(digest, expected)
+            if not valid:
+                raise _HTTPError(401, "Valid inference API key required. Create one with lmh api-key create.")
         if query:
             raise _HTTPError(400, "Inference routes do not accept query parameters")
         if not self.server.inference_slots.acquire(blocking=False):
@@ -576,7 +617,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._finish_capture()
 
     def _engine_target(self, model):
-        return self.server.controller.inference_target(model, exclude_port=self.server.server_port)
+        ports = self.server.listener_ports or {self.server.server_port}
+        return self.server.controller.inference_target(model, exclude_ports=ports)
 
     @staticmethod
     def _model_descriptor(model, pairs):
@@ -586,15 +628,14 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/health" and self.command in {"GET", "HEAD"}:
             self._json(200, {"ok": True})
             return
-        if path == "/api/webhooks/action" and self.command == "POST":
-            self._submit(self._webhook_auth())
-            return
         self._normal_auth()
         controller = self.server.controller
         if self.command in {"GET", "HEAD"}:
             try:
                 if path == "/api/status":
                     data = controller.status()
+                    if self.server.inference_url:
+                        data = {**data, "inference_url": self.server.inference_url}
                 elif path == "/api/stats":
                     if query:
                         params = parse_qs(query, keep_blank_values=True, max_num_fields=1, errors="strict")
@@ -806,9 +847,9 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def make_server(
-    controller, host: str = "127.0.0.1", port: int = 5189,
+    controller, host: str = "127.0.0.1", port: int | None = None,
     ui_dir: Path | None = None, api_token: str | None = None, webhooks: dict | None = None,
-    inference_log_dir: Path | None = None,
+    inference_log_dir: Path | None = None, *, role="panel", inference_keys=None, public_hostname=None,
 ) -> ThreadingHTTPServer:
     """Build an HTTP server without starting it. Non-loopback requires a token.
 
@@ -818,10 +859,16 @@ def make_server(
     if host == "localhost":
         host = "127.0.0.1"
     local = _loopback(host)
+    defaults = {"panel": PANEL_PORT, "inference": INFERENCE_PORT, "webhook": WEBHOOK_PORT}
+    if role not in defaults:
+        raise ValueError("Unknown listener role")
+    if port is None:
+        port = defaults[role]
     if api_token is not None:
         _credential(api_token)
-    if not local and api_token is None:
-        raise ValueError("non-loopback binding requires an API token")
+    if not local and (role != "panel" or api_token is None):
+        raise ValueError("Non-loopback binding is only supported for a panel with an operator token.")
     scopes = _webhook_config(webhooks, api_token)
     root = Path(ui_dir).resolve() if ui_dir is not None else None
-    return _Server((host, port), controller, local, root, api_token, scopes, inference_log_dir)
+    return _Server((host, port), controller, local, root, api_token, scopes, inference_log_dir,
+                   role, inference_policy(inference_keys, public_hostname))

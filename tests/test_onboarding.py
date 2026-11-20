@@ -39,7 +39,9 @@ class OnboardingTests(unittest.TestCase):
         self.policy = self.config / "policy.json"
         self.events = []
         self.enterContext(patch.object(onboarding, "_ai_home", return_value=home))
-        self.enterContext(patch.dict(os.environ, {"LMH_API_TOKEN": "", "LMH_ENDPOINT": ""}))
+        self.enterContext(patch.dict(os.environ, {
+            "LMH_API_TOKEN": "", "LMH_ENDPOINT": "", "LMH_INFERENCE_ENDPOINT": "", "LMH_INFERENCE_KEY": "",
+        }))
         self.backend = self.enterContext(patch.object(onboarding, "Backend")).return_value
         self.install = self.enterContext(patch.object(onboarding, "install_cpu_runtime", side_effect=self.approve))
         self.systemctl = self.enterContext(patch.object(onboarding.subprocess, "run"))
@@ -90,9 +92,9 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(self.systemctl.call_args.args, (["systemctl", "--user", "restart", "localmodelhub.service"],))
         self.backend.action.assert_called_once_with("start", "qwen2.5-chat", "cpu")
         self.assertEqual(self.smoke.call_count, 2)
-        self.smoke.assert_called_with("http://127.0.0.1:5189", None)
-        self.assertEqual(self.events[-1]["dashboard"], "http://127.0.0.1:5189")
-        self.assertEqual(self.events[-1]["inference"], "http://127.0.0.1:5189/v1")
+        self.smoke.assert_called_with("http://127.0.0.1:5101", None)
+        self.assertEqual(self.events[-1]["dashboard"], "http://127.0.0.1:5100")
+        self.assertEqual(self.events[-1]["inference"], "http://127.0.0.1:5101/v1")
         self.assertEqual(self.catalog.read_bytes(), initial)
         self.assertEqual(json.loads(self.policy.read_text())["runtimes"]["another-runtime"], {})
         self.assertEqual(json.loads(self.policy.read_text())["gpu_headroom_mib"], 900)
@@ -173,7 +175,9 @@ class OnboardingTests(unittest.TestCase):
         self.catalog.write_text(json.dumps(self.active))
         self.policy.write_text(json.dumps({"api_token": "configured-token-not-for-another-service"}))
         self.backend.status.return_value = self.status()
-        with patch.dict(os.environ, {"LMH_ENDPOINT": "http://localhost:5197/"}):
+        with patch.dict(os.environ, {"LMH_ENDPOINT": "http://localhost:5197/",
+                                     "LMH_INFERENCE_ENDPOINT": "http://localhost:5198/",
+                                     "LMH_INFERENCE_KEY": "isolated-inference-key"}):
             self.assertEqual(onboarding.onboard(self.emit), 1)
             self.assertIn("will not restart", self.events[-1]["message"])
             onboarding.Backend.assert_called_once_with("http://localhost:5197", timeout=4, token=None)
@@ -185,7 +189,7 @@ class OnboardingTests(unittest.TestCase):
             ]
             self.assertEqual(onboarding.onboard(self.emit), 0)
         self.assertEqual(self.events[-1]["dashboard"], "http://localhost:5197")
-        self.smoke.assert_called_once_with("http://localhost:5197", None)
+        self.smoke.assert_called_once_with("http://localhost:5198", "isolated-inference-key")
         self.systemctl.assert_not_called()
         self.install.assert_not_called()
 
@@ -218,7 +222,7 @@ class OnboardingHTTPTests(unittest.TestCase):
             conn.getresponse.return_value = contextlib.nullcontext(response)
             result = onboarding.Backend(onboarding.DASHBOARD, 4, "local-token").action("start", "name", "cpu")
         self.assertEqual(result, {"id": "job"})
-        connection.assert_called_once_with("127.0.0.1", 5189, timeout=4)
+        connection.assert_called_once_with("127.0.0.1", 5100, timeout=4)
         self.assertEqual(conn.request.call_args.args, ("POST", "/api/actions"))
         self.assertEqual(json.loads(conn.request.call_args.kwargs["body"]),
                          {"action": "start", "model": "name", "profile": "cpu"})
@@ -231,8 +235,8 @@ class OnboardingHTTPTests(unittest.TestCase):
                 {"data": [{"id": onboarding.MODEL}]},
                 {"choices": [{"message": {"content": "Hello"}}]},
             ]
-            self.assertEqual(onboarding._smoke(onboarding.DASHBOARD, "local-token"), onboarding.DASHBOARD + "/v1")
-        backend.assert_called_once_with(onboarding.DASHBOARD, timeout=60, token="local-token")
+            self.assertEqual(onboarding._smoke(onboarding.INFERENCE, "local-token"), onboarding.INFERENCE + "/v1")
+        backend.assert_called_once_with(onboarding.INFERENCE, timeout=60, token="local-token")
         self.assertEqual(client.request.call_args_list[0].args, ("/v1/models",))
         path, request = client.request.call_args.args
         self.assertEqual(path, "/v1/chat/completions")

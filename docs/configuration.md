@@ -54,7 +54,7 @@ As `ai`, in a directory writable by that account:
 tar -xzf localmodelhub.tar.gz
 cd localmodelhub
 bash deploy/install.sh
-curl --fail --retry 5 --retry-connrefused http://127.0.0.1:5189/api/health
+curl --fail --retry 5 --retry-connrefused http://127.0.0.1:5100/api/health
 ```
 
 You can remove the downloaded archive after installation.
@@ -134,27 +134,58 @@ credentials in place. The service and onboarding must use the same `HOME`
 and, if overridden, the same `HF_HOME`. Never put tokens in a catalog,
 command-line argument, or Git. Use mode `0600` for `service.env` if you use it.
 
-On the host, the panel is available at `http://127.0.0.1:5189` and the
-OpenAI-compatible inference API at `http://127.0.0.1:5189/v1`.
-Keep the panel and engines on loopback. To reach them from another machine, use an SSH
-tunnel through an account authorized on the host:
+On the host, the panel is at `http://127.0.0.1:5100`, inference is at
+`http://127.0.0.1:5101/v1`, and webhooks listen on `127.0.0.1:5102`.
+Keep the panel and engines on loopback. To reach the panel remotely, use an
+SSH tunnel through an authorized account:
 
 ```bash
-ssh -N -L 5189:127.0.0.1:5189 your-user@your-host
+ssh -N -L 5100:127.0.0.1:5100 your-user@your-host
 ```
 
 Loopback is not a per-user security boundary on a shared host. A Hugging Face
 token does not authenticate panel users. Only allow trusted operators to use
 the panel; do not expose the backend directly.
 
-The policy's `api_token` protects the ordinary API. Set it in the panel's
-Settings or provide it to the CLI/TUI with `LMH_API_TOKEN` in a private
-environment. The separate `webhooks` policy object can give each automation
+The policy's `api_token` protects the panel's management API. Give it to the panel
+in Settings or to the CLI/TUI with `LMH_API_TOKEN` in a private environment.
+The separate `webhooks` policy object can give each automation
 caller its own token, allowed `actions` and allowed `models`. A caller sends
-`Authorization: Bearer …` to `POST /api/webhooks/action` with `action`,
+`Authorization: Bearer …` to `POST http://127.0.0.1:5102/api/webhooks/action` with `action`,
 `model`, and `profile`. A `switch` also needs `from_model` and `from_profile`,
 and both model IDs must be in scope. Use independent random secrets for
 callers and the ordinary API; store them privately and rotate exposed tokens.
+
+## Inference keys and Cloudflare Tunnel
+
+```bash
+lmh api-key create laptop
+lmh api-key list
+lmh api-key revoke laptop
+```
+
+Save a newly generated key when it's printed; the service stores only its
+hash. Set it as the API key in your OpenAI client. Creating the first key
+enables bearer authentication for inference, including on loopback.
+Revoking the last key does not reopen access. Panel and webhook tokens do
+not grant inference access. If you rerun onboarding with keys enabled, set
+`LMH_INFERENCE_KEY` in a private environment so its chat check can authenticate.
+
+To expose inference through [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/):
+
+1. Create an inference key and run `lmh cloudflare setup ai.example.com`,
+   replacing the hostname with one you control.
+2. In Cloudflare Zero Trust, create a tunnel and run the provided `cloudflared`
+   connector on the LocalModelHub host. Add a **Published application route**
+   using the hostname that `lmh` printed, service `http://127.0.0.1:5101`, and
+   the public hostname as **HTTP Host Header** under the HTTP settings.
+3. Set your client's base URL to `https://ai.example.com/v1` and use the
+   inference key. Don't publish the panel (`5100`), webhooks (`5102`), or
+   engine ports. `lmh cloudflare disable` stops accepting the public hostname;
+   remove the route in Cloudflare too.
+
+The `lmh` command configures the local origin, not your Cloudflare account
+or DNS. Never share Cloudflare connector credentials or inference keys.
 
 ## Inference statistics and logging
 

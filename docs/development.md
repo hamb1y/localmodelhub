@@ -50,7 +50,7 @@ test -s "$prefix/web/build/index.html"
 The archive smoke test does not exercise the one-step bootstrap. On a
 disposable supported Linux host, test that the bootstrap installs the
 dependencies and CPU runtime, downloads and verifies the public starter,
-and succeeds at a real chat request on port 8081. Check that an interactive
+and succeeds at a real chat request on port 5101. Check that an interactive
 run opens the Ratatui UI and that a noninteractive run completes the same
 setup in the logs. For an existing install, check that the custom catalog
 is unchanged and running profiles are not stopped.
