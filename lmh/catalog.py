@@ -17,6 +17,8 @@ _COMMIT = re.compile(r"[0-9a-fA-F]{40}")
 _DIGEST = re.compile(r"[0-9a-fA-F]{64}")
 _REPO_PART = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+INPUT_TYPES = frozenset({"text", "image", "audio", "video"})
+OUTPUT_TYPES = INPUT_TYPES | {"decision", "embedding"}
 
 
 def _object(value: object, where: str) -> dict:
@@ -31,8 +33,8 @@ def _only(obj: dict, keys: set[str], where: str) -> None:
 
 
 def _identifier(value: object, where: str) -> str:
-    if not isinstance(value, str) or not _ID.fullmatch(value):
-        raise CatalogError(f"{where} must be an identifier (letters, digits, '_', '-', '.')")
+    if not isinstance(value, str) or len(value) > 256 or not _ID.fullmatch(value):
+        raise CatalogError(f"{where} must be an identifier of up to 256 characters (letters, digits, '_', '-', '.')")
     return value
 
 
@@ -102,6 +104,30 @@ def _reference(value: object, entries: dict, where: str) -> str:
     return name
 
 
+def _model_io(raw: object, where: str) -> list[dict]:
+    if not isinstance(raw, list) or not raw:
+        raise CatalogError(f"{where} must be a nonempty array of input/output pairs")
+    seen = set()
+    pairs = []
+    for index, entry in enumerate(raw):
+        location = f"{where}[{index}]"
+        pair = _object(entry, location)
+        _only(pair, {"input", "output"}, location)
+        inputs, output = pair.get("input"), pair.get("output")
+        if (not isinstance(inputs, list) or not inputs
+                or any(not isinstance(kind, str) or kind not in INPUT_TYPES for kind in inputs)
+                or len(set(inputs)) != len(inputs)):
+            raise CatalogError(f"{location}.input must list distinct types: {', '.join(sorted(INPUT_TYPES))}")
+        if not isinstance(output, str) or output not in OUTPUT_TYPES:
+            raise CatalogError(f"{location}.output must be one of: {', '.join(sorted(OUTPUT_TYPES))}")
+        key = tuple(sorted(inputs)), output
+        if key in seen:
+            raise CatalogError(f"{location} repeats an input/output pair")
+        seen.add(key)
+        pairs.append({"input": list(key[0]), "output": output})
+    return sorted(pairs, key=lambda pair: (pair["input"], pair["output"]))
+
+
 def validate_catalog(raw: object) -> dict:
     """Return a normalized schema-v1 catalog without mutating the input.
 
@@ -125,8 +151,9 @@ def validate_catalog(raw: object) -> dict:
     models = {}
     for name, model in _named(obj.get("models"), "models"):
         where = f"models.{name}"
-        _only(model, {"name", "profiles", "default_profile"}, where)
+        _only(model, {"name", "io", "profiles", "default_profile"}, where)
         label = _text(model.get("name"), f"{where}.name")
+        model_io = _model_io(model.get("io"), f"{where}.io")
         profiles = {}
         for profile_id, profile in _named(model.get("profiles"), f"{where}.profiles"):
             location = f"{where}.profiles.{profile_id}"
@@ -148,7 +175,7 @@ def validate_catalog(raw: object) -> dict:
             profiles[profile_id] = deepcopy(profile)
         if not profiles:
             raise CatalogError(f"{where}.profiles must not be empty")
-        models[name] = {"name": label, "profiles": profiles}
+        models[name] = {"name": label, "io": model_io, "profiles": profiles}
         if "default_profile" in model:
             models[name]["default_profile"] = _reference(
                 model["default_profile"], profiles, f"{where}.default_profile"

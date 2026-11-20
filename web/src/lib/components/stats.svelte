@@ -7,7 +7,10 @@
   let { hardware, stats, models, loading = false, error = '' }: { hardware?: Hardware; stats?: Stats; models: Model[]; loading?: boolean; error?: string } = $props();
   const label = (key: string) => key.replace(/[_-]+/g, ' ').replace(/^./, (c) => c.toUpperCase());
   let samples = $derived(stats?.samples ?? []);
-  let profiles = $derived(stats?.profiles ?? []);
+  let modelFilter = $state('');
+  let profiles = $derived((stats?.profiles ?? []).filter((item) => !modelFilter || item.model === modelFilter));
+  let jobs = $derived((stats?.jobs_by_model ?? []).filter((item) => !modelFilter || item.model === modelFilter));
+  let language = $derived((stats?.language_by_model ?? []).filter((item) => !modelFilter || item.model === modelFilter));
   let selection = $state('');
   const profileKey = (profile: InferenceProfile) => JSON.stringify([profile.model, profile.profile]);
   const modelName = (model: string) => models.find((item) => item.id === model)?.name ?? model;
@@ -76,6 +79,30 @@
   {/each}
 </section>
 
+<div class="mt-5 flex items-center justify-between gap-3">
+  <h2 class="text-sm font-semibold">Model statistics</h2>
+  <select aria-label="Filter statistics by model" class="field h-8 w-auto max-w-full py-0 text-xs" bind:value={modelFilter}>
+    <option value="">All models</option>
+    {#each models as model (model.id)}<option value={model.id}>{model.name}</option>{/each}
+  </select>
+</div>
+
+<section class="panel mt-3 p-4 sm:p-5">
+  <h2 class="text-sm font-semibold">Language heuristic</h2>
+  <p class="mt-1 text-xs text-faint">Approximate English matches in generated text through the unified API. Not a quality score.</p>
+  {#each language as row (row.model)}
+    <div class="mt-3 border-t border-line pt-3">
+      <h3 class="text-sm font-medium">{modelName(row.model)}</h3>
+      <p class="mt-1 text-xs text-muted">
+        {row.mild} mild profanity · {row.strong} strong profanity · {row.slurs} slurs · {row.responses} responses scanned
+        {#if row.truncated} · {row.truncated} partially scanned{/if}
+      </p>
+    </div>
+  {:else}
+    <p class="mt-3 text-sm text-muted">No generated text has been scanned for this selection.</p>
+  {/each}
+</section>
+
 {#if stats?.profiles}
   <section class="panel mt-3 p-4 sm:p-5">
     <div class="flex flex-wrap items-center justify-between gap-3">
@@ -114,7 +141,7 @@
 {#if stats?.samples}
   <section class="panel mt-3 p-4 sm:p-5">
     <div class="flex flex-wrap items-center justify-between gap-2">
-      <h2 class="text-sm font-semibold">Memory history</h2>
+      <h2 class="text-sm font-semibold">Host memory history</h2>
       <p class="text-xs text-faint">Up to 6 hours</p>
     </div>
     <TrendChart title="Memory used" formatValue={formatBytes} series={[
@@ -130,7 +157,7 @@
       <h2 class="text-sm font-semibold">Jobs by model</h2>
       <span class="text-xs text-faint">Last 24 hours</span>
     </header>
-    {#each stats.jobs_by_model as job (job.model)}
+    {#each jobs as job (job.model)}
       <div class="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3 last:border-b-0 sm:px-5">
         <span class="text-sm font-medium wrap-anywhere">{modelName(job.model)}</span>
         <span class="text-xs text-muted">{job.finished} finished · {job.failed} failed{job.start_seconds == null ? '' : ` · ${job.start_seconds.toFixed(1)} s average startup`}</span>
@@ -141,6 +168,7 @@
   </section>
 {/if}
 
+{#if !modelFilter}
 <section class="panel mt-3 overflow-hidden">
   <header class="flex items-center gap-2 border-b border-line px-4 py-3 sm:px-5">
     <Activity class="size-4 text-accent" />
@@ -163,3 +191,4 @@
     <p class="px-4 py-5 text-sm text-muted sm:px-5">{error || (loading ? 'Reading metrics…' : 'The host has not published additional metrics.')}</p>
   {/if}
 </section>
+{/if}

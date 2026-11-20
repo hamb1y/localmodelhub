@@ -20,8 +20,9 @@ runtime. See [README.md](README.md) for the user workflow.
   artifacts. Preserve local config, jobs, caches, and running engine units.
   Uninstall stops only LocalModelHub-owned units; never remove adopted services
   or externally referenced model files.
-- **Metrics are evidence.** Keep unreported values distinct from zero. Do not
-  store prompts, responses, or tokens used for authentication.
+- **Metrics are evidence.** Keep unreported values distinct from zero. Store
+  only language counts by default. Store inference bodies only under the
+  explicit local logging policy, and never capture authentication headers.
 
 ## Where to work
 

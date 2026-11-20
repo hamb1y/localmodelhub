@@ -609,6 +609,31 @@ class Controller:
             maintenance.close()
             self.jobs.task_done()
 
+    def inference_target(self, model: str, *, exclude_port=None) -> tuple[str, int] | None:
+        """Find a ready loopback engine without changing lifecycle state."""
+        if not self.config_valid or self.boot["state"] != "complete":
+            return None
+        spec = self.config["models"].get(model)
+        if spec is None:
+            return None
+        profiles = spec["profiles"]
+        preferred = spec.get("default_profile")
+        for name in sorted(profiles, key=lambda name: (name != preferred, name)):
+            profile = profiles[name]
+            host = profile.get("host", "127.0.0.1")
+            port = profile.get("port")
+            if host not in {"localhost", "127.0.0.1", "::1"} or not port or port == exclude_port:
+                continue
+            try:
+                if self._observe((model, name))["state"] == "running" and self.ready(self._url(profile)):
+                    return ("127.0.0.1" if host == "localhost" else host), port
+            except (OSError, RuntimeError):
+                continue
+        return None
+
+    def inference_types(self) -> dict:
+        return {model: spec["io"] for model, spec in self.config["models"].items()} if self.config_valid else {}
+
     def status(self):
         models = []
         for model, spec in self.config["models"].items():
@@ -625,7 +650,7 @@ class Controller:
                                  "start_on_boot": any(b["model"] == model and self._key(model, b.get("profile"))[1] == name
                                                       for b in self.config["boot"]),
                                  "controllable": self._can_control(profile), **observed})
-            models.append({"id": model, "name": spec["name"], "profiles": profiles,
+            models.append({"id": model, "name": spec["name"], "io": spec["io"], "profiles": profiles,
                            "default_profile": spec.get("default_profile"), "description": spec.get("description")})
         return {"models": models, "jobs": self.state.jobs(), "hardware": self.hardware(), "boot": self.boot,
                 "catalog_staged": (self.state_dir / "pending-models.json").exists()}
@@ -635,10 +660,11 @@ class Controller:
         _, runtime = self._profile(key)
         return self.driver.logs(*key, runtime)
 
-    def stats(self):
-        stats = self.state.stats()
-        measured = self.telemetry.stats()
-        return {**stats, **measured, "metrics": {**stats["metrics"], **measured["metrics"]}}
+    def stats(self, model=None):
+        stats = self.state.stats(model)
+        measured = self.telemetry.stats(model)
+        return {**stats, **measured, "model": model, "language_by_model": self.state.language_stats(model),
+                "metrics": {**stats["metrics"], **measured["metrics"]}}
 
     def _can_control(self, profile: dict) -> bool:
         runtime = self.config["runtimes"][profile["runtime"]]

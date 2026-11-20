@@ -90,6 +90,8 @@ class Backend:
                 pass
         if not 200 <= status < 300:
             detail = result.get("error") if isinstance(result, dict) else None
+            if isinstance(detail, dict):
+                detail = detail.get("message")
             raise BackendError(f"HTTP {status}" + (f": {detail}" if isinstance(detail, str) else ""), status)
         if not isinstance(result, dict):
             raise BackendError(f"Invalid or oversized JSON response from {path}")
@@ -157,13 +159,14 @@ def _entry(status: dict) -> dict | None:
 
 
 def _recipe(catalog: dict):
-    profile = catalog["models"].get(MODEL, {}).get("profiles", {}).get(PROFILE)
+    model = catalog["models"].get(MODEL, {})
+    profile = model.get("profiles", {}).get(PROFILE)
     if profile is None:
         return None
     artifacts = profile["artifacts"]
     if set(artifacts) != {"model"} or not isinstance(artifacts["model"], str):
         return None
-    return profile, catalog["runtimes"][profile["runtime"]], catalog["artifacts"][artifacts["model"]]
+    return profile, catalog["runtimes"][profile["runtime"]], catalog["artifacts"][artifacts["model"]], model["io"]
 
 
 def _load_active(config: Path, state: Path, status: dict) -> dict:
@@ -176,8 +179,8 @@ def _load_active(config: Path, state: Path, status: dict) -> dict:
 
 def _matches_bundled(bundled, active, *, alternate_port: bool) -> bool:
     if alternate_port and active is not None:
-        profile, runtime, artifact = active
-        active = ({**profile, "port": bundled[0]["port"]}, runtime, artifact)
+        profile, runtime, artifact, model_io = active
+        active = ({**profile, "port": bundled[0]["port"]}, runtime, artifact, model_io)
     return bundled == active
 
 
@@ -258,15 +261,12 @@ def _wait_for_model(backend: Backend, job_id: str | None, emit) -> dict:
     return _until(check, JOB_TIMEOUT, f"Starter readiness timed out; {START_HINT}.")
 
 
-def _smoke(port: int) -> str:
-    endpoint = f"http://127.0.0.1:{port}"
-    client = Backend(endpoint, timeout=60)
-    models = client.request("/v1/models").get("data") or [{}]
-    alias = models[0].get("id")
-    if not isinstance(alias, str) or not alias:
-        raise RuntimeError("The local inference server did not report a model.")
+def _smoke(endpoint: str, token: str | None) -> str:
+    client = Backend(endpoint, timeout=60, token=token)
+    if not any(model.get("id") == MODEL for model in client.request("/v1/models").get("data", [])):
+        raise RuntimeError("The unified inference API did not list the starter model.")
     response = client.request("/v1/chat/completions", {
-        "model": alias, "messages": [{"role": "user", "content": "Reply with the word hello."}],
+        "model": MODEL, "messages": [{"role": "user", "content": "Reply with the word hello."}],
         "temperature": 0, "max_tokens": 16, "stream": False,
     })
     choices = response.get("choices") or [{}]
@@ -312,12 +312,12 @@ def onboard(emit) -> int:
             emit("done", "ok", "Panel is ready. Your custom starter was left unchanged and was not started.",
                  dashboard=dashboard)
             return 0
-        profile, _, artifact = active
+        profile, _, artifact, _ = active
         if (profile["device"] != "cpu" or profile["host"] != "127.0.0.1"
                 or artifact["source"]["kind"] != "hf" or not artifact.get("hashes")):
             raise RuntimeError("The installed starter is not a pinned local CPU profile; reinstall the release.")
         emit(stage, "ok", f"Selected the bundled {MODEL}/{PROFILE} starter.")
-        port = _inference_port(entry, profile)
+        _inference_port(entry, profile)
 
         if entry["state"] != "ready":
             pending = next((job["id"] for job in status["jobs"]
@@ -343,7 +343,7 @@ def onboard(emit) -> int:
                     entry = _entry(status)
                     if entry is None or not entry["controllable"] or active != _recipe(_load_active(config, state, status)):
                         raise RuntimeError(f"The approved starter was not loaded; {SERVICE_HINT}.")
-                    port = _inference_port(entry, profile)
+                    _inference_port(entry, profile)
             stage = "start"
             if entry["state"] != "ready" or pending:
                 if not pending:
@@ -352,7 +352,7 @@ def onboard(emit) -> int:
                         pending = backend.action("start", MODEL, PROFILE)["id"]
                     except BackendError as exc:
                         raise RuntimeError(f"Could not submit the starter start: {exc}; {START_HINT}.") from None
-                port = _inference_port(_wait_for_model(backend, pending, emit), profile)
+                _inference_port(_wait_for_model(backend, pending, emit), profile)
             emit(stage, "ok", "Starter is ready.")
         else:
             emit("start", "ok", "Starter is already ready.")
@@ -360,7 +360,7 @@ def onboard(emit) -> int:
         stage = "smoke"
         emit(stage, "working", "Checking a local chat completion.")
         try:
-            inference = _smoke(port)
+            inference = _smoke(dashboard, token)
         except (BackendError, RuntimeError, TypeError, AttributeError, IndexError) as exc:
             raise RuntimeError(f"Chat smoke test failed: {exc}; {START_HINT}.") from None
         emit(stage, "ok", "Local chat completion succeeded.")

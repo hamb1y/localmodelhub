@@ -70,6 +70,8 @@ cp -- "$root/deploy/install.sh" "$root/deploy/localmodelhub.service" \
 cp -R -- "$root/web/build" "$bundle/web/"
 mkdir -- "$bundle/catalogs"
 cp -- "$root/catalogs/models.example.json" "$root/catalogs/starter.json" "$bundle/catalogs/"
+mkdir -- "$bundle/docs"
+cp -- "$root/docs/models-json.md" "$root/docs/configuration.md" "$bundle/docs/"
 
 if command -v uv >/dev/null 2>&1; then
     (cd "$root" && uv build --wheel --out-dir "$bundle/wheels")
@@ -80,7 +82,7 @@ fi
 
 (
     cd "$bundle"
-    find bin wheels web/build deploy catalogs README.md LICENSE -type f -print0 |
+    find bin wheels web/build deploy catalogs docs README.md LICENSE -type f -print0 |
         sort -z |
         xargs -0 sha256sum > SHA256SUMS
 )

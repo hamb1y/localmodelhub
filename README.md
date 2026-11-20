@@ -29,8 +29,37 @@ Without a terminal it performs the same setup and reports progress in the
 logs. No Hugging Face login is needed for the starter; authentication is
 optional for other models that require it.
 
-On the same host, open the [web panel](http://127.0.0.1:5189) or point
-your OpenAI-compatible client directly at `http://127.0.0.1:8081/v1`.
+On the same host, open the [web panel](http://127.0.0.1:5189) or point your
+OpenAI-compatible client at `http://127.0.0.1:5189/v1` with model
+`qwen2.5-chat`. The same URL serves every ready model.
+
+## Add your own models
+
+Model types are defined in `models.json` by input and output. See the
+[`models.json` reference](docs/models-json.md) for examples, supported fields,
+and how to validate a draft before using it.
+
+Copy this prompt into your AI agent:
+
+```text
+Help me build a LocalModelHub models.json draft. Follow the reference:
+https://github.com/hamb1y/localmodelhub/blob/main/docs/models-json.md
+Use the starter as a working example:
+https://github.com/hamb1y/localmodelhub/blob/main/catalogs/starter.json
+
+Ask me which models I want, what each accepts and produces, what CPU/GPU
+hardware I have, and whether I have an existing models.json to preserve.
+For each model, declare only supported input/output pairs in its io field.
+Verify the exact files, revision, size, and available checksums from a
+trusted source. Ask me for missing facts; don't guess pins, paths, or ports.
+Keep tokens and runtime approvals out of models.json. Leave boot empty
+for new models unless I ask for boot starts.
+
+Return the complete UTF-8 JSON as a draft. If you have access to my
+LocalModelHub daemon, run lmh preview --catalog on the draft and report
+the result. Don't overwrite or stage my live config, start or stop models,
+or install runtimes without asking.
+```
 
 ## Runtimes and startup
 

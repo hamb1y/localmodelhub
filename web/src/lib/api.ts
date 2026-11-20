@@ -2,7 +2,7 @@ export type Profile = {
   id: string; device: string; state: string; port?: number | null; message?: string | null;
   host?: string; controllable?: boolean; start_on_boot?: boolean;
 };
-export type Model = { id: string; name: string; profiles: Profile[]; default_profile?: string | null; description?: string | null };
+export type Model = { id: string; name: string; profiles: Profile[]; io?: { input: string[]; output: string }[]; default_profile?: string | null; description?: string | null };
 export type Job = {
   id: string; action: string; model: string; profile: string; state: string;
   message?: string | null; created_at: string | number; updated_at: string | number; source?: string | null;
@@ -26,6 +26,7 @@ export type Stats = {
   jobs_by_model?: JobRollup[];
   metrics?: Record<string, unknown>;
   profiles?: InferenceProfile[];
+  language_by_model?: { model: string; responses: number; truncated: number; mild: number; strong: number; slurs: number }[];
 } & Record<string, unknown>;
 export type Status = {
   models: Model[]; jobs: Job[]; hardware: Hardware; boot: { state: string; message?: string | null };

@@ -93,6 +93,7 @@
   "models": {
     "qwen2.5-chat": {
       "name": "Qwen2.5 0.5B Instruct · Q4_K_M",
+      "io": [{"input": ["text"], "output": "text"}],
       "profiles": {
         "cpu": {
           "runtime": "llama-cpu",
@@ -119,6 +120,7 @@
     },
     "mxbai-embed-xsmall": {
       "name": "Mixedbread Embed XSmall v1 · Q8_0",
+      "io": [{"input": ["text"], "output": "embedding"}],
       "profiles": {
         "cpu": {
           "runtime": "llama-cpu",
@@ -147,6 +149,10 @@
     },
     "qwen-image-turbo": {
       "name": "Qwen Image 2.1 Turbo · Q4_K_M",
+      "io": [
+        {"input": ["text"], "output": "image"},
+        {"input": ["text", "image"], "output": "image"}
+      ],
       "profiles": {
         "cuda": {
           "runtime": "sd-cuda",

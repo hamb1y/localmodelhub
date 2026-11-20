@@ -32,6 +32,14 @@ pub struct Model {
     pub name: String,
     pub profiles: Vec<Profile>,
     pub default_profile: Option<String>,
+    #[serde(default)]
+    pub io: Vec<ModelIo>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ModelIo {
+    pub input: Vec<String>,
+    pub output: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -147,8 +155,12 @@ impl Client {
         self.send(self.http.get(self.url("/api/status")))
     }
 
-    pub fn stats(&self) -> Result<Value> {
-        self.send_object(self.http.get(self.url("/api/stats")))
+    pub fn stats(&self, model: Option<&str>) -> Result<Value> {
+        let request = self.http.get(self.url("/api/stats"));
+        self.send_object(match model {
+            Some(model) => request.query(&[("model", model)]),
+            None => request,
+        })
     }
 
     pub fn logs(&self, model: &str, profile: &str) -> Result<Vec<String>> {

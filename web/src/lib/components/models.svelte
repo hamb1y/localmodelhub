@@ -69,6 +69,9 @@
           <div class="min-w-0 flex-1">
             <h2 class="wrap-anywhere text-sm font-semibold">{model.name}</h2>
             <p class="mt-0.5 font-mono text-[11px] wrap-anywhere text-faint">{model.id}</p>
+            {#if model.io?.length}
+              <p class="mt-1 text-xs text-muted">{model.io.map((pair) => `${pair.input.join(' + ')} → ${pair.output}`).join(' · ')}</p>
+            {/if}
             {#if model.description}<p class="mt-1 text-xs wrap-anywhere text-muted">{model.description}</p>{/if}
           </div>
           <span class="shrink-0 text-xs text-faint">{model.profiles.length} {model.profiles.length === 1 ? 'profile' : 'profiles'}</span>

@@ -45,7 +45,8 @@ def catalog(boot=()):
         options = {"runtime": name, "artifacts": {}, "device": device}
         if vram:
             options["vram_mib"] = vram
-        profiles[name] = {"name": name, "default_profile": "default", "profiles": {"default": options}}
+        profiles[name] = {"name": name, "io": [{"input": ["text"], "output": "text"}],
+                          "default_profile": "default", "profiles": {"default": options}}
     return {"schema_version": 1, "runtimes": runtimes, "artifacts": {}, "models": profiles,
             "boot": [{"model": key, "profile": "default"} for key in boot]}
 

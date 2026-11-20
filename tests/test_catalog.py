@@ -22,6 +22,7 @@ def sample():
         "models": {
             "m": {
                 "name": "My Model",
+                "io": [{"input": ["text"], "output": "text"}],
                 "profiles": {
                     "p": {"runtime": "native", "device": "gpu",
                           "artifacts": {"model": ["first", "second"], "aux": "second"}},
@@ -35,8 +36,22 @@ def sample():
 
 class CatalogTest(unittest.TestCase):
     def test_example(self):
-        example = Path(__file__).resolve().parents[1] / "catalogs" / "models.example.json"
-        self.assertIn("example-model", load_catalog(example)["models"])
+        directory = Path(__file__).resolve().parents[1] / "catalogs"
+        for example in directory.glob("*.json"):
+            with self.subTest(example=example):
+                self.assertTrue(load_catalog(example)["models"])
+
+    def test_model_types_reject_missing_unknown_repeated_and_flattened_pairs(self):
+        for invalid in (None, [], [{"input": "text", "output": "text"}],
+                        [{"input": ["embedding"], "output": "text"}],
+                        [{"input": ["text", "text"], "output": "text"}],
+                        [{"input": ["text"], "output": "vision"}],
+                        [{"input": ["text", "image"], "output": "text"},
+                         {"input": ["image", "text"], "output": "text"}]):
+            raw = sample()
+            raw["models"]["m"]["io"] = invalid
+            with self.subTest(io=invalid), self.assertRaisesRegex(CatalogError, r"models\.m\.io"):
+                validate_catalog(raw)
 
     def test_normalizes_without_mutation_and_preserves_single_and_sharded_roles(self):
         raw = sample()

@@ -51,6 +51,9 @@ enum Command {
     Logs(ProfileArgs),
     /// Show reported memory, lifecycle, and inference statistics.
     Stats {
+        /// Show statistics for a single model ID.
+        #[arg(long)]
+        model: Option<String>,
         /// Print the raw statistics response.
         #[arg(long)]
         json: bool,
@@ -168,8 +171,8 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Stats { json } => {
-            let stats = client.stats()?;
+        Command::Stats { model, json } => {
+            let stats = client.stats(model.as_deref())?;
             if json {
                 return print_json(&stats);
             }
@@ -384,7 +387,11 @@ fn print_hardware(hardware: &Hardware, indent: &str) {
 }
 
 fn print_stats(stats: &Value) {
-    println!("Memory usage (latest sample):");
+    println!(
+        "Statistics: {}",
+        stats["model"].as_str().unwrap_or("all models")
+    );
+    println!("Host memory usage (latest sample):");
     if let Some(sample) = stats["samples"]
         .as_array()
         .and_then(|samples| samples.last())
@@ -463,6 +470,32 @@ fn print_stats(stats: &Value) {
     if !reported {
         println!("  No inference counters reported.");
     }
+    println!("\nLanguage heuristic (approximate English matches, not a quality score):");
+    let language = language_stats_lines(stats);
+    if language.is_empty() {
+        println!("  No generated text scanned.");
+    }
+    for line in language {
+        println!("  {line}");
+    }
+}
+
+fn language_stats_lines(stats: &Value) -> Vec<String> {
+    rows(&stats["language_by_model"])
+        .iter()
+        .map(|row| {
+            let count = |field: &str| row[field].as_u64().unwrap_or(0);
+            format!(
+                "{}: {} mild profanity · {} strong profanity · {} slurs · {} responses scanned ({} partial)",
+                row["model"].as_str().unwrap_or("—"),
+                count("mild"),
+                count("strong"),
+                count("slurs"),
+                count("responses"),
+                count("truncated"),
+            )
+        })
+        .collect()
 }
 
 fn rows(value: &Value) -> &[Value] {

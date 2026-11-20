@@ -33,6 +33,8 @@ def _policy(path: Path) -> dict:
             raise ValueError(f"Local policy {key!r} must be an object")
     if "api_token" in policy and (not isinstance(policy["api_token"], str) or len(policy["api_token"]) < 24):
         raise ValueError("api_token must be an unguessable string of at least 24 characters")
+    if not isinstance(policy.get("inference_logging", False), bool):
+        raise ValueError("inference_logging must be true or false")
     budget = policy.get("gpu_headroom_mib", 512)
     if type(budget) is not int or not 0 <= budget <= 16384:
         raise ValueError("gpu_headroom_mib must be an integer from 0 to 16384")
@@ -63,7 +65,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("Another LocalModelHub process owns this state directory") from None
             controller = Controller(args.catalog, args.state_dir, policy)
             server = make_server(controller, host=args.host, port=args.port, ui_dir=args.ui_dir,
-                                 api_token=policy.get("api_token"), webhooks=policy.get("webhooks"))
+                                 api_token=policy.get("api_token"), webhooks=policy.get("webhooks"),
+                                 inference_log_dir=(args.state_dir / "inference-logs"
+                                                    if policy.get("inference_logging") else None))
             with server:
                 for sig in (signal.SIGINT, signal.SIGTERM):
                     signal.signal(sig, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
