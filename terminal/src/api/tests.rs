@@ -185,7 +185,7 @@ fn client_does_not_follow_redirects() {
     let (endpoint, worker) = fake_backend("302 Found", "Location: /redirect-target\r\n", "{}");
     let error = Client::new(&endpoint, Some("sample-token".into()))
         .unwrap()
-        .stats()
+        .stats(None)
         .unwrap_err();
     worker.join().unwrap();
     assert_eq!(error.to_string(), "HTTP 302: Found");

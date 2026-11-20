@@ -25,6 +25,14 @@ class State:
                 CREATE TABLE IF NOT EXISTS samples (
                     timestamp REAL PRIMARY KEY, ram_used_bytes INTEGER, vram_used_bytes INTEGER
                 );
+                CREATE TABLE IF NOT EXISTS language_stats (
+                    model TEXT PRIMARY KEY, responses INTEGER NOT NULL, truncated INTEGER NOT NULL,
+                    mild INTEGER NOT NULL, strong INTEGER NOT NULL, slurs INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS video_jobs (
+                    id TEXT PRIMARY KEY, model TEXT NOT NULL, host TEXT NOT NULL,
+                    port INTEGER NOT NULL, upstream_id TEXT NOT NULL
+                );
             """)
         self.db.chmod(0o600)
 
@@ -71,7 +79,34 @@ class State:
             con.execute("INSERT OR REPLACE INTO samples VALUES (?,?,?)", (timestamp, ram_used, vram_used))
             con.execute("DELETE FROM samples WHERE timestamp < ?", (timestamp - 7 * 86400,))
 
-    def stats(self) -> dict:
+    def record_language(self, model, counts, truncated=False):
+        with closing(self.connect()) as con, con:
+            con.execute("""
+                INSERT INTO language_stats VALUES (?, 1, ?, ?, ?, ?)
+                ON CONFLICT(model) DO UPDATE SET responses=responses+1,
+                    truncated=truncated+excluded.truncated, mild=mild+excluded.mild,
+                    strong=strong+excluded.strong, slurs=slurs+excluded.slurs
+            """, (model, int(truncated), counts["mild"], counts["strong"], counts["slurs"]))
+
+    def language_stats(self, model=None):
+        with closing(self.connect()) as con:
+            return [dict(row) for row in con.execute(
+                "SELECT * FROM language_stats" + (" WHERE model=?" if model is not None else "") + " ORDER BY model",
+                (model,) if model is not None else (),
+            )]
+
+    def add_video(self, model, target, upstream_id):
+        job = "video_" + uuid.uuid4().hex
+        with closing(self.connect()) as con, con:
+            con.execute("INSERT INTO video_jobs VALUES (?, ?, ?, ?, ?)", (job, model, *target, upstream_id))
+        return job
+
+    def video(self, job):
+        with closing(self.connect()) as con:
+            row = con.execute("SELECT * FROM video_jobs WHERE id=?", (job,)).fetchone()
+        return dict(row) if row else None
+
+    def stats(self, model=None) -> dict:
         now = time.time()
         with closing(self.connect()) as con:
             # Bucket to one minute and bound the plot payload even on a long-running instance.
@@ -86,8 +121,9 @@ class State:
                        SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) AS failed,
                        AVG(CASE WHEN action IN ('start','switch') AND state='done'
                            THEN updated_at-created_at ELSE NULL END) AS start_seconds
-                FROM jobs WHERE created_at >= ? AND state IN ('done','failed') GROUP BY model
-            """, (now - 24 * 3600,))]
+                FROM jobs WHERE created_at >= ? AND state IN ('done','failed')
+                AND (? IS NULL OR model=?) GROUP BY model
+            """, (now - 24 * 3600, model, model))]
         return {"samples": samples, "jobs_by_model": jobs,
                 "metrics": {"requests": None, "tokens": None, "prompt_cache_hit_rate": None,
                             "expert_cache_hit_rate": None, "inference_error_rate": None}}

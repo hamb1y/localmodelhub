@@ -4,6 +4,7 @@ import hmac
 import http.client
 import ipaddress
 import json
+import logging
 import math
 import mimetypes
 import queue
@@ -18,6 +19,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from lmh.catalog import validate_catalog
+from lmh import inference
+from lmh.inference_log import InferenceLog
 
 
 _ACTIONS = {"start", "stop", "switch"}
@@ -301,13 +304,16 @@ def _webhook_config(webhooks, api_token):
 
 
 class _Server(ThreadingHTTPServer):
-    def __init__(self, address, controller, local, ui_dir, api_token, webhooks):
+    def __init__(self, address, controller, local, ui_dir, api_token, webhooks, inference_log_dir):
         self.controller = controller
         self.local = local
         self.ui_dir = ui_dir
         self.api_token = api_token
         self.webhooks = webhooks
+        self.inference_log_dir = inference_log_dir
+        self.inference_log_warned = threading.Event()
         self._slots = threading.BoundedSemaphore(32)
+        self.inference_slots = threading.BoundedSemaphore(8)
         if ":" in address[0]:
             self.address_family = socket.AF_INET6
         super().__init__(address, _Handler)
@@ -333,6 +339,7 @@ class _Handler(BaseHTTPRequestHandler):
     timeout = _TIMEOUT
     server_version = "lmh"
     sys_version = ""
+    inference_log = None
 
     def log_message(self, format, *args):
         # Request targets and headers need not be copied into operational logs.
@@ -350,6 +357,9 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(405, {"error": "method not allowed"})
 
     def _dispatch(self):
+        self.inference_log = None
+        path = self.path.partition("?")[0]
+        is_inference = path == "/v1" or path.startswith("/v1/")
         try:
             authority = self._check_host()
             if self.command == "POST":
@@ -357,16 +367,26 @@ class _Handler(BaseHTTPRequestHandler):
             if not self.path.startswith("/") or "#" in self.path:
                 raise _HTTPError(400, "invalid request target")
             path, _, query = self.path.partition("?")
-            if path == "/api" or path.startswith("/api/"):
+            if is_inference:
+                self._inference(path, query)
+            elif path == "/api" or path.startswith("/api/"):
                 self._api(path, query)
             elif self.command in {"GET", "HEAD"}:
                 self._static(path)
             else:
                 raise _HTTPError(404, "not found")
-        except _HTTPError as error:
-            self._json(error.status, {"error": str(error)})
+        except (_HTTPError, inference.InferenceError) as error:
+            if is_inference:
+                code = getattr(error, "code", "invalid_request")
+                kind = "server_error" if error.status >= 500 else "invalid_request_error"
+                self._json(error.status, {"error": {"message": str(error), "type": kind, "code": code,
+                                                    "param": None}})
+            else:
+                self._json(error.status, {"error": str(error)})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True
+        finally:
+            self._finish_capture()
 
     def _check_host(self):
         values = self.headers.get_all("Host", [])
@@ -437,6 +457,131 @@ class _Handler(BaseHTTPRequestHandler):
             raise _HTTPError(401, "valid webhook bearer credential required")
         return matched
 
+    def _inference(self, path, query):
+        if self.server.api_token is not None:
+            self._normal_auth()
+        else:
+            # OpenAI clients require an API key even for unauthenticated local servers.
+            self._bearer()
+        if query:
+            raise _HTTPError(400, "Inference routes do not accept query parameters")
+        if not self.server.inference_slots.acquire(blocking=False):
+            raise inference.InferenceError(429, "Too many active inference requests.", "rate_limit")
+        try:
+            self._inference_request(path)
+        finally:
+            self.server.inference_slots.release()
+
+    def _inference_request(self, path):
+        controller = self.server.controller
+        if self.command == "GET" and path.startswith("/v1/videos/"):
+            self._video(path)
+            return
+        if self.command in {"GET", "HEAD"} and (path == "/v1/models" or path.startswith("/v1/models/")):
+            models = controller.inference_types()
+            if path == "/v1/models":
+                self._json(200, {"object": "list", "data": [
+                    self._model_descriptor(model, pairs) for model, pairs in sorted(models.items())
+                    if self._engine_target(model)
+                ]})
+            else:
+                model = inference.model_id(path.removeprefix("/v1/models/"))
+                if model not in models or not self._engine_target(model):
+                    raise inference.InferenceError(404, "Model is not available.", "model_not_found")
+                self._json(200, self._model_descriptor(model, models[model]))
+            return
+        if self.command != "POST" or path not in inference.JSON_ROUTES.keys() | inference.UPLOAD_ROUTES.keys():
+            raise inference.InferenceError(404, "Inference endpoint not supported.", "endpoint_not_found")
+        if path in inference.JSON_ROUTES:
+            request_type, raw = self._read_body(inference.REQUEST_LIMIT, "application/json")
+            body = self._parse_body(raw)
+            model = inference.model_id(body.get("model"))
+            inputs, output = inference.json_io(path, body)
+        else:
+            request_type, raw = self._read_body(inference.REQUEST_LIMIT, "multipart/form-data")
+            model, fields = inference.parse_upload(request_type, raw, path)
+            inputs, output = inference.UPLOAD_ROUTES[path]
+            if path == "/v1/videos" and any(name == "input_reference" for name, *_ in fields):
+                inputs = inputs | {"image"}
+            body = None
+        pairs = controller.inference_types().get(model)
+        if pairs is None:
+            raise inference.InferenceError(404, "Unknown model ID. See /v1/models.", "model_not_found")
+        if not inference.supports(pairs, inputs, output, body):
+            raise inference.InferenceError(400, "This input/output pair is not declared by the model.",
+                                           "unsupported_model_io")
+        target = self._engine_target(model)
+        if not target:
+            raise inference.InferenceError(503, "Model is not ready. Start it explicitly in LocalModelHub.",
+                                           "model_not_ready")
+        self._begin_capture(model, path, request_type, raw)
+        alias = inference.upstream_alias(target, model)
+        if body is None:
+            payload, media = inference.encode_upload(fields, alias)
+        else:
+            media = "application/json"
+            payload = json.dumps({**body, "model": alias}, allow_nan=False).encode()
+        inference.relay(self, target, path, payload, media, model)
+
+    def _video(self, path):
+        job, separator, asset = path.removeprefix("/v1/videos/").partition("/")
+        if not re.fullmatch(r"video_[0-9a-f]{32}", job) or (separator and asset != "content"):
+            raise inference.InferenceError(404, "Unknown video.", "video_not_found")
+        stored = self.server.controller.state.video(job)
+        if stored is None:
+            raise inference.InferenceError(404, "Unknown video.", "video_not_found")
+        model = stored["model"]
+        target = self._engine_target(model)
+        if target != (stored["host"], stored["port"]):
+            raise inference.InferenceError(503, "The original video engine is not ready.", "model_not_ready")
+        self._begin_capture(model, path, None, b"")
+        upstream_path = f"/v1/videos/{stored['upstream_id']}" + ("/content" if asset else "")
+        inference.relay(self, target, upstream_path, None, None, model, video_id=job)
+
+    def _begin_capture(self, model, path, request_type, raw):
+        if self.server.inference_log_dir is not None:
+            try:
+                self.inference_log = InferenceLog(self.server.inference_log_dir, model, path, request_type, raw)
+            except OSError:
+                # Local capture is best effort; never log payloads to the journal.
+                self._capture_warning()
+
+    def _capture_warning(self):
+        if not self.server.inference_log_warned.is_set():
+            self.server.inference_log_warned.set()
+            logging.warning("Could not save an inference log. Check the directory permissions and available space.")
+
+    def _finish_capture(self):
+        if self.inference_log is not None:
+            capture, self.inference_log = self.inference_log, None
+            try:
+                capture.finish()
+            except OSError:
+                self._capture_warning()
+
+    def _write_body(self, data, *, complete=False):
+        if self.inference_log is not None:
+            try:
+                self.inference_log.write(data)
+            except OSError:
+                self._capture_warning()
+                self._finish_capture()
+        if complete:
+            self._complete_body()
+        self.wfile.write(data)
+
+    def _complete_body(self):
+        if self.inference_log is not None:
+            self.inference_log.metadata["complete"] = True
+            self._finish_capture()
+
+    def _engine_target(self, model):
+        return self.server.controller.inference_target(model, exclude_port=self.server.server_port)
+
+    @staticmethod
+    def _model_descriptor(model, pairs):
+        return {"id": model, "object": "model", "created": 0, "owned_by": "localmodelhub", "io": pairs}
+
     def _api(self, path, query):
         if path == "/api/health" and self.command in {"GET", "HEAD"}:
             self._json(200, {"ok": True})
@@ -451,7 +596,16 @@ class _Handler(BaseHTTPRequestHandler):
                 if path == "/api/status":
                     data = controller.status()
                 elif path == "/api/stats":
-                    data = controller.stats()
+                    if query:
+                        params = parse_qs(query, keep_blank_values=True, max_num_fields=1, errors="strict")
+                        if set(params) != {"model"} or len(params["model"]) != 1:
+                            raise ValueError("one model is required")
+                        model = params["model"][0]
+                        if model not in controller.inference_types():
+                            raise _HTTPError(404, "unknown model")
+                        data = controller.stats(model)
+                    else:
+                        data = controller.stats()
                 elif path == "/api/logs":
                     params = parse_qs(query, keep_blank_values=True, max_num_fields=2, errors="strict")
                     if set(params) != {"model", "profile"} or any(
@@ -475,7 +629,7 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             raise _HTTPError(404, "not found")
 
-    def _body(self, limit):
+    def _read_body(self, limit, content_type):
         if "Transfer-Encoding" in self.headers or "Content-Encoding" in self.headers:
             raise _HTTPError(400, "encoded request bodies are not supported")
         lengths = self.headers.get_all("Content-Length", [])
@@ -487,8 +641,8 @@ class _Handler(BaseHTTPRequestHandler):
         if len(digits) > len(str(limit)) or int(digits) > limit:
             raise _HTTPError(413, "request body is too large")
         media = self.headers.get_all("Content-Type", [])
-        if len(media) != 1 or self.headers.get_content_type() != "application/json":
-            raise _HTTPError(415, "Content-Type must be application/json")
+        if len(media) != 1 or self.headers.get_content_type() != content_type:
+            raise _HTTPError(415, f"Content-Type must be {content_type}")
         remaining = int(digits)
         deadline = time.monotonic() + _TIMEOUT
         data = bytearray()
@@ -504,6 +658,14 @@ class _Handler(BaseHTTPRequestHandler):
             raise _HTTPError(408, "request body timed out") from error
         finally:
             self.connection.settimeout(_TIMEOUT)
+        return media[0], data
+
+    def _body(self, limit):
+        _, data = self._read_body(limit, "application/json")
+        return self._parse_body(data)
+
+    @staticmethod
+    def _parse_body(data):
         try:
             body = _decode_json(data)
         except (ValueError, RecursionError) as error:
@@ -617,9 +779,14 @@ class _Handler(BaseHTTPRequestHandler):
         return resolved
 
     def _headers(self, status, media, length):
+        if self.inference_log is not None:
+            self.inference_log.headers(status, media)
         self.send_response(status)
         self.send_header("Content-Type", media)
-        self.send_header("Content-Length", str(length))
+        if length is not None:
+            self.send_header("Content-Length", str(length))
+        else:
+            self.send_header("Connection", "close")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
@@ -633,12 +800,15 @@ class _Handler(BaseHTTPRequestHandler):
         encoded = json.dumps(data, allow_nan=False).encode("utf-8")
         self._headers(status, "application/json; charset=utf-8", len(encoded))
         if self.command != "HEAD":
-            self.wfile.write(encoded)
+            self._write_body(encoded, complete=True)
+        else:
+            self._complete_body()
 
 
 def make_server(
     controller, host: str = "127.0.0.1", port: int = 5189,
     ui_dir: Path | None = None, api_token: str | None = None, webhooks: dict | None = None,
+    inference_log_dir: Path | None = None,
 ) -> ThreadingHTTPServer:
     """Build an HTTP server without starting it. Non-loopback requires a token.
 
@@ -654,4 +824,4 @@ def make_server(
         raise ValueError("non-loopback binding requires an API token")
     scopes = _webhook_config(webhooks, api_token)
     root = Path(ui_dir).resolve() if ui_dir is not None else None
-    return _Server((host, port), controller, local, root, api_token, scopes)
+    return _Server((host, port), controller, local, root, api_token, scopes, inference_log_dir)

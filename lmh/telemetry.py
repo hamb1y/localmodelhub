@@ -211,7 +211,7 @@ class Telemetry:
             )
             con.execute("DELETE FROM inference_samples WHERE timestamp < ?", (timestamp - 7 * 86400,))
 
-    def stats(self) -> dict:
+    def stats(self, model=None) -> dict:
         """Return observed totals and a six-hour series of scrape intervals.
 
         Cache hit rates use paired observations only. The aggregate is weighted
@@ -221,7 +221,9 @@ class Telemetry:
         processed_sum = cached_sum = 0
         with closing(self._connect()) as con, con:
             con.execute("BEGIN")
-            for row in con.execute("SELECT * FROM inference_latest ORDER BY model, profile"):
+            for row in con.execute("""
+                SELECT * FROM inference_latest WHERE (? IS NULL OR model=?) ORDER BY model, profile
+            """, (model, model)):
                 item = self._usage(row)
                 processed = int(row["cache_processed_tokens"] or 0)
                 cached = int(row["cache_cached_tokens"] or 0)
@@ -231,8 +233,9 @@ class Telemetry:
                             samples=[], prompt_cache_hit_rate=_cache_rate(processed, cached), **_UNSUPPORTED)
                 profiles[(row["model"], row["profile"])] = item
             for row in con.execute("""
-                SELECT * FROM inference_samples WHERE timestamp >= ? ORDER BY timestamp
-            """, (time.time() - 6 * 3600,)):
+                SELECT * FROM inference_samples WHERE timestamp >= ?
+                AND (? IS NULL OR model=?) ORDER BY timestamp
+            """, (time.time() - 6 * 3600, model, model)):
                 item = self._usage(row)
                 seconds = row["seconds"]
                 item.update(timestamp=row["timestamp"], interval_seconds=seconds,

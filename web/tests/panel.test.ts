@@ -7,7 +7,8 @@ test('static panel uses explicit, separate lifecycle and catalog operations', as
   const now = 1_795_230_000;
   const status: Status = {
     models: [
-      { id: 'alice', name: 'Alice', profiles: [{ id: 'gpu', device: 'gpu', state: 'ready', port: 8123 }] },
+      { id: 'alice', name: 'Alice', io: [{ input: ['text'], output: 'text' }],
+        profiles: [{ id: 'gpu', device: 'gpu', state: 'ready', port: 8123 }] },
       { id: 'bob', name: 'Bob', profiles: [{ id: 'cpu', device: 'cpu', state: 'stopped' }], default_profile: 'cpu' },
       { id: 'cara', name: 'Cara', profiles: [{ id: 'gpu', device: 'gpu', state: 'ready' }] }
     ],
@@ -38,6 +39,10 @@ test('static panel uses explicit, separate lifecycle and catalog operations', as
             { timestamp: now + 60, ram_used_bytes: 4000, vram_used_bytes: 2000 }
           ], jobs_by_model: [{ model: 'alice', finished: 1, failed: 0, start_seconds: 4.2 }],
           metrics: { requests: null, tokens: 25 },
+          language_by_model: [
+            { model: 'alice', responses: 3, truncated: 0, mild: 2, strong: 1, slurs: 0 },
+            { model: 'cara', responses: 1, truncated: 0, mild: 0, strong: 0, slurs: 1 }
+          ],
           profiles: [{
             model: 'alice', profile: 'gpu', timestamp: now + 60, prompt_tokens: 20, generation_tokens: 5, tokens: 25,
             samples: [
@@ -74,6 +79,7 @@ test('static panel uses explicit, separate lifecycle and catalog operations', as
       const errors: Error[] = [];
       page.on('pageerror', (error) => errors.push(error));
       await page.goto(server.url.toString());
+      await page.getByText('text → text', { exact: true }).waitFor();
       await page.getByRole('button', { name: 'Start Bob / cpu' }).click();
       await page.getByText('Start requested for Bob / cpu.', { exact: false }).waitFor();
       expect(actions).toEqual([{ action: 'start', model: 'bob', profile: 'cpu' }]);
@@ -105,6 +111,12 @@ test('static panel uses explicit, separate lifecycle and catalog operations', as
       await page.getByRole('heading', { name: 'Token usage' }).waitFor();
       await page.getByRole('img', { name: /Token throughput.*peak 3 tok\/s/ }).waitFor();
       await page.getByText('Unreported', { exact: true }).waitFor();
+      const modelFilter = page.getByLabel('Filter statistics by model');
+      await modelFilter.selectOption('alice');
+      await page.getByText(/2 mild profanity · 1 strong profanity · 0 slurs/).waitFor();
+      expect(await page.getByText(/1 slurs/).count()).toBe(0);
+      await modelFilter.selectOption('bob');
+      await page.getByText('No generated text has been scanned for this selection.').waitFor();
 
       await page.getByRole('link', { name: 'Catalog import' }).click();
       await page.getByRole('tab', { name: 'JSON' }).click();

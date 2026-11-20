@@ -19,6 +19,7 @@
   "models": {
     "gyro": {
       "name": "Gyro-M · TQ2_0",
+      "io": [{"input": ["text"], "output": "text"}],
       "profiles": {
         "adopted": {
           "runtime": "gyro",
@@ -32,6 +33,7 @@
     },
     "swift": {
       "name": "Swift 1.5 27B · EXL3 3.5 bpw",
+      "io": [{"input": ["text"], "output": "text"}],
       "profiles": {
         "adopted": {
           "runtime": "swift",
@@ -45,6 +47,7 @@
     },
     "qwen": {
       "name": "Swift 1.5 27B · UD-IQ3_S",
+      "io": [{"input": ["text"], "output": "text"}],
       "profiles": {
         "adopted": {
           "runtime": "qwen",
@@ -58,6 +61,7 @@
     },
     "mellum": {
       "name": "Mellum 2.1 · EXL3 K6",
+      "io": [{"input": ["text"], "output": "text"}],
       "profiles": {
         "adopted": {
           "runtime": "mellum",
@@ -71,6 +75,7 @@
     },
     "raon": {
       "name": "Raon-1 mini preview · IQ4_XS",
+      "io": [{"input": ["text"], "output": "text"}],
       "profiles": {
         "adopted": {
           "runtime": "raon",
@@ -84,6 +89,7 @@
     },
     "omni": {
       "name": "LFM3 Omni 2B · Q8_0",
+      "io": [{"input": ["text"], "output": "text"}],
       "profiles": {
         "adopted": {
           "runtime": "omni",
@@ -97,6 +103,7 @@
     },
     "d1": {
       "name": "LiquidAI d1-2B · Q8_0",
+      "io": [{"input": ["text"], "output": "text"}],
       "profiles": {
         "adopted": {
           "runtime": "d1",
@@ -110,6 +117,7 @@
     },
     "embedding": {
       "name": "Qwen3 Embedding 4B · IQ4_XS",
+      "io": [{"input": ["text"], "output": "embedding"}],
       "profiles": {
         "adopted": {
           "runtime": "embedding",
@@ -123,6 +131,7 @@
     },
     "parakeet": {
       "name": "Parakeet TDT 0.6B v3 · Q8_0",
+      "io": [{"input": ["audio"], "output": "text"}],
       "profiles": {
         "adopted": {
           "runtime": "parakeet",
@@ -136,6 +145,7 @@
     },
     "kokoro": {
       "name": "Kokoro 82M · int8",
+      "io": [{"input": ["text"], "output": "audio"}],
       "profiles": {
         "adopted": {
           "runtime": "kokoro",
@@ -149,6 +159,7 @@
     },
     "flint": {
       "name": "Flint 40B-A2.5B · NVFP4",
+      "io": [{"input": ["text"], "output": "text"}],
       "profiles": {
         "adopted": {
           "runtime": "flint",
@@ -162,6 +173,7 @@
     },
     "gemma4": {
       "name": "Gemma 4 26B A4B · EXL3 3.54 bpw",
+      "io": [{"input": ["text"], "output": "text"}],
       "profiles": {
         "adopted": {
           "runtime": "gemma4",
@@ -175,6 +187,7 @@
     },
     "qwen-image-turbo": {
       "name": "Qwen Image 2.1 Turbo · Q4_K_M",
+      "io": [{"input": ["text"], "output": "image"}, {"input": ["image", "text"], "output": "image"}],
       "profiles": {
         "adopted": {
           "runtime": "qwen-image-turbo",

@@ -80,30 +80,12 @@ home, `--no-systemd` installs files without talking to the service manager.
 
 ## Catalogs
 
-Use `lmh preview --catalog FILE` to inspect a catalog without applying it,
-downloading models, or starting inference. From an unpacked release, see
-`catalogs/starter.json` for pinned public artifacts and
-`catalogs/models.example.json` for local examples.
-
-A catalog is UTF-8 JSON with `schema_version: 1` and named maps `runtimes`,
-`artifacts`, and `models`. Profiles choose a runtime, `cpu` or `gpu`, and
-artifacts by ID. An artifact role can map to one ID or an ordered list of
-shards. Hugging Face artifacts specify a repository, a full 40-character
-commit and an exact repository-relative filename. Record `size` in bytes and
-`hashes` (`sha256` and/or `blake3`) when available. A local artifact requires
-an absolute path. Keep credentials, machine-specific paths, and executable
-paths out of shared catalogs.
+See the [`models.json` reference](models-json.md) for the schema, model
+input/output pairs, and how to preview, stage, or edit a file.
 
 Boot status reports a BLAKE3 fingerprint of the accepted catalog, independent
 of whitespace and key order. Checksums verify file integrity; they are not a
 substitute for reviewing a catalog or trusting its publisher.
-
-After setup, edits to the local catalog take effect at the next Linux boot.
-The panel, or `lmh stage --catalog FILE`, can explicitly stage a portable catalog
-for that boot. Staging accepts typed adapters and pinned Hugging Face files
-with a hash and size, but not host-only paths or arbitrary runtime arguments.
-The staged catalog takes priority at the next boot and its submitted `boot`
-list is cleared. If you want boot actions, configure them locally.
 
 ## Runtime policy
 
@@ -146,15 +128,15 @@ normal install. Managed inference units retain `NoNewPrivileges=true`.
 ## Credentials and remote access
 
 The public CPU starter does not require a token. For gated or private
-models, obtain access upstream and then run `lmh onboard --hf-login` as `ai`
+models, obtain access upstream and then run `lmh hf-login` as `ai`
 with a minimally scoped read token. It hides token input and leaves existing
 credentials in place. The service and onboarding must use the same `HOME`
 and, if overridden, the same `HF_HOME`. Never put tokens in a catalog,
 command-line argument, or Git. Use mode `0600` for `service.env` if you use it.
 
-On the host, the panel is available at `http://127.0.0.1:5189` and the CPU
-starter’s OpenAI-compatible inference API at `http://127.0.0.1:8081/v1`.
-Keep both on loopback. To reach the panel from another machine, use an SSH
+On the host, the panel is available at `http://127.0.0.1:5189` and the
+OpenAI-compatible inference API at `http://127.0.0.1:5189/v1`.
+Keep the panel and engines on loopback. To reach them from another machine, use an SSH
 tunnel through an account authorized on the host:
 
 ```bash
@@ -173,6 +155,31 @@ caller its own token, allowed `actions` and allowed `models`. A caller sends
 `model`, and `profile`. A `switch` also needs `from_model` and `from_profile`,
 and both model IDs must be in scope. Use independent random secrets for
 callers and the ordinary API; store them privately and rotate exposed tokens.
+
+## Inference statistics and logging
+
+Use the model selector on the panel's Stats page, Left/Right on the TUI Stats
+tab, or `lmh stats --model qwen2.5-chat`. The Stats API accepts the same
+scope as `GET /api/stats?model=qwen2.5-chat`. Host memory is still host-wide;
+model job totals, token telemetry, and language counts are model-specific.
+
+The language heuristic counts **mild profanity**, **strong profanity**, and
+**slurs** in generated English text passing through `/v1`. It handles case,
+common substitutions and misspellings, and words split across stream chunks.
+It can miss words or count quoted or ambiguous language: it is not a general
+measure of model quality. Counts survive daemon restarts. Prompts, matched
+words, and completions are not stored by this heuristic. Direct engine
+requests, audio bytes, and incomplete chat streams are not scored.
+
+To explicitly log inference bodies, add `"inference_logging": true` to the
+local `policy.json` and restart `localmodelhub.service` as `ai`. This is **off
+by default**. The private `state/inference-logs/` directory gets one folder
+per dispatched request with `input.body`, `output.body`, and `metadata.json`.
+It can contain full prompts, uploaded media, generated content, and errors.
+Headers such as `Authorization` are not stored. Treat these files as
+sensitive: they are not sent to the panel or automatically deleted. Monitor
+disk use and remove old logs when no longer needed. Disabling the option
+stops future capture without deleting existing files.
 
 ## Boot, model switching, and diagnostics
 

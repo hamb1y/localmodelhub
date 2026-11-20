@@ -25,6 +25,7 @@
   "models": {
     "example-model": {
       "name": "Example model (replace placeholder paths and commit)",
+      "io": [{"input": ["text"], "output": "text"}],
       "default_profile": "local-cpu",
       "profiles": {
         "local-cpu": {

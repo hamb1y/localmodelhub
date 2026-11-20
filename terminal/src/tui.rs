@@ -155,7 +155,7 @@ enum Overlay {
 
 enum Reply {
     Status(Result<Box<Status>>),
-    Stats(Result<Value>),
+    Stats(Option<String>, Result<Value>),
     Action {
         action: &'static str,
         target: ProfileKey,
@@ -175,6 +175,7 @@ struct App {
     profile_cursor: TableState,
     job_cursor: TableState,
     stats: Option<Result<Value>>,
+    stats_model: Option<String>,
     stats_scroll: u16,
     polling_status: bool,
     polling_stats: bool,
@@ -194,6 +195,7 @@ impl App {
             profile_cursor: TableState::default(),
             job_cursor: TableState::default(),
             stats: None,
+            stats_model: None,
             stats_scroll: 0,
             polling_status: false,
             polling_stats: false,
@@ -215,7 +217,11 @@ impl App {
 
     fn refresh_stats(&mut self, client: &Client, tx: &Sender<Reply>) {
         if matches!(self.tab, Tab::Stats) && !self.polling_stats {
-            self.polling_stats = self.launch(client, tx, |client| Reply::Stats(client.stats()));
+            let model = self.stats_model.clone();
+            self.polling_stats = self.launch(client, tx, move |client| {
+                let stats = client.stats(model.as_deref());
+                Reply::Stats(model, stats)
+            });
         }
     }
 
@@ -278,9 +284,13 @@ impl App {
                     Err(error) => self.status_problem = Some(format!("{error:#}")),
                 }
             }
-            Reply::Stats(result) => {
+            Reply::Stats(model, result) => {
                 self.polling_stats = false;
-                self.stats = Some(result);
+                if self.stats_model == model {
+                    self.stats = Some(result);
+                } else {
+                    self.refresh_stats(client, tx);
+                }
             }
             Reply::Action {
                 action,
@@ -530,6 +540,25 @@ impl App {
                     }
                 }
                 Tab::Stats => {
+                    if matches!(code, KeyCode::Left | KeyCode::Right) {
+                        if let Some(status) = &self.status {
+                            let index = self.stats_model.as_ref().and_then(|id| {
+                                status.models.iter().position(|model| &model.id == id)
+                            });
+                            let count = status.models.len() + 1;
+                            let current = index.map_or(0, |i| i + 1);
+                            let next = if code == KeyCode::Right {
+                                (current + 1) % count
+                            } else {
+                                (current + count - 1) % count
+                            };
+                            self.stats_model =
+                                next.checked_sub(1).map(|i| status.models[i].id.clone());
+                            self.stats = None;
+                            self.stats_scroll = 0;
+                            self.refresh_stats(client, tx);
+                        }
+                    }
                     self.stats_scroll = match code {
                         KeyCode::Up | KeyCode::Char('k') => self.stats_scroll.saturating_sub(1),
                         KeyCode::Down | KeyCode::Char('j') => self.stats_scroll.saturating_add(1),
@@ -645,6 +674,8 @@ fn draw_manager(frame: &mut Frame<'_>, app: &mut App) {
     }
     let keys = if matches!(app.tab, Tab::Models) {
         " ↑↓ Move   s Start   x Stop   w Switch   l Logs   ? Help   q Quit"
+    } else if matches!(app.tab, Tab::Stats) {
+        " ←→ Filter model   ↑↓ Scroll   Tab Views   ? Help   q Quit"
     } else {
         " ↑↓ Move   Tab Views   r Refresh   ? Help   q Quit"
     };
@@ -681,8 +712,17 @@ fn draw_models(frame: &mut Frame<'_>, app: &mut App, body: Rect, detail: Rect) {
     }
     let text = app.current().and_then(|key| {
         let profile = app.profile(key)?;
+        let io = status
+            .models
+            .iter()
+            .find(|model| model.id == key.model)
+            .into_iter()
+            .flat_map(|model| &model.io)
+            .map(|pair| format!("{} → {}", pair.input.join(" + "), pair.output))
+            .collect::<Vec<_>>()
+            .join(" · ");
         Some(format!(
-            "{} • {} • {}{}",
+            "{} • {} • {}{}{}",
             key.label(),
             clean(&profile.device),
             if profile.controllable == Some(true) {
@@ -695,6 +735,11 @@ fn draw_models(frame: &mut Frame<'_>, app: &mut App, body: Rect, detail: Rect) {
                 .as_ref()
                 .map(|text| format!(" • {}", clean(text)))
                 .unwrap_or_default(),
+            if io.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", clean(&io))
+            },
         ))
     });
     let rows = status.models.iter().flat_map(|model| {
@@ -877,6 +922,17 @@ fn stats_lines(stats: &Value, lines: &mut Vec<Line<'static>>) {
     if !reported {
         lines.push(Line::styled("No inference counters reported.", muted()));
     }
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        "Language heuristic • approximate English matches",
+        accent(),
+    ));
+    let language = crate::language_stats_lines(stats);
+    if language.is_empty() {
+        lines.push(Line::styled("No generated text scanned.", muted()));
+    } else {
+        lines.extend(language.into_iter().map(|line| Line::raw(clean(&line))));
+    }
 }
 
 fn draw_stats(frame: &mut Frame<'_>, app: &mut App, body: Rect) {
@@ -916,7 +972,10 @@ fn draw_stats(frame: &mut Frame<'_>, app: &mut App, body: Rect) {
         )),
         None => lines.push(Line::styled("Loading statistics…", muted())),
     }
-    let block = panel(" Statistics ");
+    let block = panel(format!(
+        " Statistics · {} ",
+        clean(app.stats_model.as_deref().unwrap_or("All models"))
+    ));
     let inner = block.inner(body);
     let lines = stats_wrap(lines, usize::from(inner.width));
     let limit = lines.len().saturating_sub(usize::from(inner.height));
