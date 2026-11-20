@@ -1,0 +1,15 @@
+[package]
+name = "lmh"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
+nix = { version = "0.29", features = ["fs", "user"] }
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }

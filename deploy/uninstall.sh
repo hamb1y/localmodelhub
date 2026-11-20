@@ -53,6 +53,9 @@ for unit in localmodelhub.service localmodelhub-update.service localmodelhub-upd
     rm -rf -- "$unit_dir/$unit.d"
 done
 systemctl --user daemon-reload
+if [[ $(readlink -- "$HOME/.local/bin/lmh" || true) == ../share/localmodelhub/current/bin/lmh ]]; then
+    rm -f -- "$HOME/.local/bin/lmh"
+fi
 if "$purge"; then
     rm -rf -- "$config" "$data"
     echo "LocalModelHub and its settings, history, and private cache were removed."

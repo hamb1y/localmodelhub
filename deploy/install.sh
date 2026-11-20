@@ -37,6 +37,10 @@ fi
 bundle=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 [[ -s "$bundle/SHA256SUMS" && -s "$bundle/web/build/index.html" ]] ||
     die "run from an unpacked release built with deploy/build-release.sh."
+arch=$(uname -m)
+case "$arch" in x86_64|aarch64) ;; *) die "unsupported Linux architecture: $arch." ;; esac
+terminal="$bundle/bin/lmh-$arch"
+[[ -s "$terminal" ]] || die "this release does not contain the terminal binary for $arch."
 shopt -s nullglob
 wheels=("$bundle"/wheels/localmodelhub-*.whl)
 ((${#wheels[@]} == 1)) || die "expected exactly one LocalModelHub wheel."
@@ -109,6 +113,12 @@ if [[ ! -e "$release/.ready" ]]; then
     fi
     mkdir -- "$release/web"
     cp -R -- "$bundle/web/build" "$release/web/"
+    install -D -m 0600 -- "$bundle/catalogs/starter.json" "$release/catalogs/starter.json"
+    install -D -m 0700 -- "$terminal" "$release/bin/lmh"
+    version=$("$release/venv/bin/python" -I -c 'from importlib.metadata import version; print(version("localmodelhub"))')
+    [[ $("$release/bin/lmh" --version) == "lmh $version" ]] ||
+        die "the packaged terminal and service have different versions"
+    ln -s -- ../../bin/lmh "$release/venv/bin/lmh"
     install -m 0700 -- "$bundle/deploy/uninstall.sh" "$release/uninstall.sh"
     touch -- "$release/.ready"
     cleanup_release=
@@ -158,6 +168,10 @@ if [[ "$previous_release" != "releases/$id" ]]; then
     ln -s -- "releases/$id" "$scratch/current"
     mv -Tf -- "$scratch/current" "$data/current"
     rm -f -- "$data/.systemd-release"
+fi
+if mkdir -p -- "$HOME/.local/bin" 2>/dev/null && [[ -w "$HOME/.local/bin" ]] &&
+    [[ ! -e "$HOME/.local/bin/lmh" && ! -L "$HOME/.local/bin/lmh" ]]; then
+    ln -s -- ../share/localmodelhub/current/bin/lmh "$HOME/.local/bin/lmh"
 fi
 
 if "$systemd"; then

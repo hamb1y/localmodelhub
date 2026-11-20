@@ -2,6 +2,9 @@
 
 For the normal install, start with the [README](../README.md). The commands
 below assume the service runs under the dedicated, unprivileged `ai` account.
+The one-step bootstrap already installs the verified CPU runtime and public
+starter, starts the profile without stopping others, and verifies a CPU chat
+request. The steps below are for administration, not required setup.
 
 ## Sign in as `ai`
 
@@ -9,7 +12,7 @@ Use a normal login or `sudo -iu ai` from an administrator shell. If `lmh` is
 not on your `PATH`, add the installed CLI for the current shell:
 
 ```bash
-export PATH="$HOME/.local/share/localmodelhub/current/venv/bin:$PATH"
+export PATH="$HOME/.local/share/localmodelhub/current/bin:$PATH"
 ```
 
 If `systemctl --user` cannot connect after `sudo -iu ai`, set the user-bus
@@ -21,7 +24,7 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 systemctl --user show-environment >/dev/null
 ```
 
-## Manual release install
+## Manual release install (advanced)
 
 The host needs systemd 254+, Python 3.11+, Bash, `tar`, coreutils and `flock`.
 Managed runtime units use `systemd-run --expand-environment=no` so systemd
@@ -56,6 +59,7 @@ curl --fail --retry 5 --retry-connrefused http://127.0.0.1:5189/api/health
 
 You can remove the downloaded archive after installation.
 
+This low-level installer does not run the bootstrap’s starter onboarding.
 On first install, the starter catalog provides profiles but has no boot
 actions. Pass `--catalog FILE` to seed a reviewed local catalog instead, or
 `--catalog deploy/example-catalog.json` for an empty panel. Reinstalling
@@ -72,6 +76,7 @@ home, `--no-systemd` installs files without talking to the service manager.
 | User unit | `.config/systemd/user/localmodelhub.service` |
 | Persistent state | `.local/share/localmodelhub/state/` |
 | Active release | `.local/share/localmodelhub/current/` |
+| Rust CLI and terminal UI | `.local/share/localmodelhub/current/bin/lmh` |
 
 ## Catalogs
 
@@ -120,10 +125,8 @@ before creating it). For example:
 ```
 
 Use the actual absolute path, and match any version or checksum pinned by the
-catalog. Restart the service to load policy changes. The optional
-`lmh onboard --install-cpu-runtime` downloads and verifies the pinned
-llama.cpp CPU build (`b12359`) and adds its policy entry for you. This does
-not download model weights.
+catalog. Restart the service to load manually edited policy. The normal
+bootstrap handles CPU runtime approval and activation itself.
 
 For the starter NVIDIA image profile, install your NVIDIA drivers and a
 compatible CUDA build of `sd-server` separately. Approve it under `sd-cuda`
@@ -142,15 +145,17 @@ normal install. Managed inference units retain `NoNewPrivileges=true`.
 
 ## Credentials and remote access
 
-Public Hugging Face downloads do not require a token. For gated or private
+The public CPU starter does not require a token. For gated or private
 models, obtain access upstream and then run `lmh onboard --hf-login` as `ai`
 with a minimally scoped read token. It hides token input and leaves existing
 credentials in place. The service and onboarding must use the same `HOME`
 and, if overridden, the same `HF_HOME`. Never put tokens in a catalog,
 command-line argument, or Git. Use mode `0600` for `service.env` if you use it.
 
-Keep the panel and API on loopback. To reach the panel from another machine,
-use an SSH tunnel through an account authorized on the host:
+On the host, the panel is available at `http://127.0.0.1:5189` and the CPU
+starter’s OpenAI-compatible inference API at `http://127.0.0.1:8081/v1`.
+Keep both on loopback. To reach the panel from another machine, use an SSH
+tunnel through an account authorized on the host:
 
 ```bash
 ssh -N -L 5189:127.0.0.1:5189 your-user@your-host

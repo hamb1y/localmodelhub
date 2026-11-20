@@ -28,11 +28,13 @@ runtime. See [README.md](README.md) for the user workflow.
 - **Lifecycle:** `lmh/controller.py`, `lmh/state.py`, `lmh/supervisor.py`.
 - **Catalog and execution:** `lmh/catalog.py`, `lmh/artifacts.py`, and
   `lmh/engines.py`; add focused adapter tests before adding option translations.
-- **Operations:** `lmh/api.py` is shared by the SvelteKit `web/` UI and the
-  Python CLI/Textual TUI. Keep behavior in the backend, not the clients.
+- **Operations:** `lmh/api.py` is shared by SvelteKit `web/` and the
+  Rust/Ratatui `terminal/`. Keep lifecycle behavior in the backend.
+- **Onboarding:** `install.sh` and `lmh/onboarding.py` provision and test
+  the starter through an additive Start. App updates never call onboarding.
 - **Releases:** the root `install.sh` is the public entry point;
   `deploy/` packages the verified application and systemd files. Keep
-  `pyproject.toml`, `lmh/__init__.py`, and the stable release tag in sync.
+  `pyproject.toml`, `lmh/__init__.py`, `terminal/Cargo.toml`, and the stable tag in sync.
 
 ## Verify before shipping
 
@@ -42,7 +44,9 @@ runtime. See [README.md](README.md) for the user workflow.
 2. For web changes, run `bun install --frozen-lockfile`, `npm run check`,
    `npm run build`, and `bun test` in `web/`. Install Playwright Chromium when
    there is no local Chromium.
-3. For install or update changes, build `bash deploy/build-release.sh --build-ui`
+3. For terminal changes, run `cargo fmt --check`, `cargo clippy --locked
+   --all-targets -- -D warnings`, and `cargo test --locked` in `terminal/`.
+4. For install or update changes, build `bash deploy/build-release.sh --build-ui`
    and test in an isolated home or with a systemd test double. Never exercise
    destructive deployment paths against someone’s running inference without
    explicit approval.

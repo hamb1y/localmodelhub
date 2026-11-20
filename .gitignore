@@ -5,6 +5,7 @@ __pycache__/
 /.pytest_cache/
 /build/
 /dist/
+/terminal/target/
 /web/.svelte-kit/
 /web/build/
 /web/node_modules/
