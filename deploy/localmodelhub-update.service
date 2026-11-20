@@ -1,0 +1,7 @@
+[Unit]
+Description=Check for a newer official LocalModelHub app release
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/localmodelhub/current/venv/bin/python -I -m lmh.update
+UMask=0077

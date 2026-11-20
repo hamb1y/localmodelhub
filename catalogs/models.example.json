@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "runtimes": {
+    "native-llama": {
+      "adapter": "llama.cpp",
+      "executable": "/absolute/path/to/llama-server"
+    }
+  },
+  "artifacts": {
+    "local-weights": {
+      "source": {
+        "kind": "local",
+        "path": "/absolute/path/to/model.gguf"
+      }
+    },
+    "hf-weights": {
+      "source": {
+        "kind": "hf",
+        "repo": "example-org/replace-with-model-repo",
+        "revision": "0123456789abcdef0123456789abcdef01234567",
+        "file": "replace-with-model.gguf"
+      }
+    }
+  },
+  "models": {
+    "example-model": {
+      "name": "Example model (replace placeholder paths and commit)",
+      "default_profile": "local-cpu",
+      "profiles": {
+        "local-cpu": {
+          "runtime": "native-llama",
+          "device": "cpu",
+          "artifacts": { "model": "local-weights" }
+        },
+        "hf-cpu": {
+          "runtime": "native-llama",
+          "device": "cpu",
+          "artifacts": { "model": "hf-weights" }
+        }
+      }
+    }
+  },
+  "boot": []
+}

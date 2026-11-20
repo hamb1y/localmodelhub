@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "runtimes": {
+    "gyro": { "adapter": "systemd", "unit": "gyro-m.service" },
+    "swift": { "adapter": "systemd", "unit": "exl3-server.service" },
+    "qwen": { "adapter": "systemd", "unit": "qwen38-server.service" },
+    "mellum": { "adapter": "systemd", "unit": "padra-server.service" },
+    "raon": { "adapter": "systemd", "unit": "raon1-server.service" },
+    "omni": { "adapter": "systemd", "unit": "lfm3-omni-server.service" },
+    "d1": { "adapter": "systemd", "unit": "d1-server.service" },
+    "embedding": { "adapter": "systemd", "unit": "qwen3-embedding-server.service" },
+    "parakeet": { "adapter": "systemd", "unit": "ai-parakeet.service" },
+    "kokoro": { "adapter": "systemd", "unit": "ai-kokoro.service" },
+    "flint": { "adapter": "systemd", "unit": "ai-flint.service" },
+    "gemma4": { "adapter": "systemd", "unit": "gemma4-exl3-server.service" },
+    "qwen-image-turbo": { "adapter": "systemd", "unit": "qwen-image-2.1-turbo.service" }
+  },
+  "artifacts": {},
+  "models": {
+    "gyro": {
+      "name": "Gyro-M · TQ2_0",
+      "profiles": {
+        "adopted": {
+          "runtime": "gyro",
+          "artifacts": {},
+          "device": "gpu",
+          "host": "127.0.0.1",
+          "port": 5117,
+          "health": { "path": "/health", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "swift": {
+      "name": "Swift 1.5 27B · EXL3 3.5 bpw",
+      "profiles": {
+        "adopted": {
+          "runtime": "swift",
+          "artifacts": {},
+          "device": "gpu",
+          "host": "127.0.0.1",
+          "port": 5110,
+          "health": { "path": "/health", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "qwen": {
+      "name": "Swift 1.5 27B · UD-IQ3_S",
+      "profiles": {
+        "adopted": {
+          "runtime": "qwen",
+          "artifacts": {},
+          "device": "gpu",
+          "host": "127.0.0.1",
+          "port": 5114,
+          "health": { "path": "/health", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "mellum": {
+      "name": "Mellum 2.1 · EXL3 K6",
+      "profiles": {
+        "adopted": {
+          "runtime": "mellum",
+          "artifacts": {},
+          "device": "gpu",
+          "host": "127.0.0.1",
+          "port": 5119,
+          "health": { "path": "/readyz", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "raon": {
+      "name": "Raon-1 mini preview · IQ4_XS",
+      "profiles": {
+        "adopted": {
+          "runtime": "raon",
+          "artifacts": {},
+          "device": "gpu",
+          "host": "127.0.0.1",
+          "port": 5113,
+          "health": { "path": "/health", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "omni": {
+      "name": "LFM3 Omni 2B · Q8_0",
+      "profiles": {
+        "adopted": {
+          "runtime": "omni",
+          "artifacts": {},
+          "device": "gpu",
+          "host": "127.0.0.1",
+          "port": 5112,
+          "health": { "path": "/health", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "d1": {
+      "name": "LiquidAI d1-2B · Q8_0",
+      "profiles": {
+        "adopted": {
+          "runtime": "d1",
+          "artifacts": {},
+          "device": "gpu",
+          "host": "127.0.0.1",
+          "port": 5118,
+          "health": { "path": "/health", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "embedding": {
+      "name": "Qwen3 Embedding 4B · IQ4_XS",
+      "profiles": {
+        "adopted": {
+          "runtime": "embedding",
+          "artifacts": {},
+          "device": "cpu",
+          "host": "127.0.0.1",
+          "port": 5111,
+          "health": { "path": "/health", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "parakeet": {
+      "name": "Parakeet TDT 0.6B v3 · Q8_0",
+      "profiles": {
+        "adopted": {
+          "runtime": "parakeet",
+          "artifacts": {},
+          "device": "cpu",
+          "host": "127.0.0.1",
+          "port": 5115,
+          "health": { "path": "/health", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "kokoro": {
+      "name": "Kokoro 82M · int8",
+      "profiles": {
+        "adopted": {
+          "runtime": "kokoro",
+          "artifacts": {},
+          "device": "cpu",
+          "host": "127.0.0.1",
+          "port": 5116,
+          "health": { "path": "/healthz", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "flint": {
+      "name": "Flint 40B-A2.5B · NVFP4",
+      "profiles": {
+        "adopted": {
+          "runtime": "flint",
+          "artifacts": {},
+          "device": "gpu",
+          "host": "127.0.0.1",
+          "port": 5133,
+          "health": { "path": "/health", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "gemma4": {
+      "name": "Gemma 4 26B A4B · EXL3 3.54 bpw",
+      "profiles": {
+        "adopted": {
+          "runtime": "gemma4",
+          "artifacts": {},
+          "device": "gpu",
+          "host": "127.0.0.1",
+          "port": 5120,
+          "health": { "path": "/health", "timeout_seconds": 180 }
+        }
+      }
+    },
+    "qwen-image-turbo": {
+      "name": "Qwen Image 2.1 Turbo · Q4_K_M",
+      "profiles": {
+        "adopted": {
+          "runtime": "qwen-image-turbo",
+          "artifacts": {},
+          "device": "gpu",
+          "host": "127.0.0.1",
+          "port": 5121,
+          "health": { "path": "/v1/models", "timeout_seconds": 180 }
+        }
+      }
+    }
+  },
+  "boot": []
+}

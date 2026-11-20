@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: Inter, ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --color-background: #0c1411;
+  --color-sidebar: #0f1915;
+  --color-panel: #131e19;
+  --color-raised: #192720;
+  --color-hover: #22332a;
+  --color-line: #293831;
+  --color-line-strong: #3a4e42;
+  --color-foreground: #e8f0ea;
+  --color-muted: #9aac9f;
+  --color-faint: #84998b;
+  --color-accent: #aaf2b3;
+  --color-accent-hover: #c6facb;
+  --color-accent-foreground: #14321d;
+  --color-warning: #f3cb87;
+  --color-danger: #ffadac;
+}
+
+@layer base {
+  :root { color-scheme: dark; }
+  body { @apply bg-background font-sans text-foreground antialiased; }
+  ::selection { @apply bg-accent text-accent-foreground; }
+  :focus-visible { @apply outline-2 outline-offset-3 outline-accent; }
+  button:not(:disabled), select:not(:disabled) { cursor: pointer; }
+}
+
+@layer components {
+  .panel { @apply rounded-xl border border-line bg-panel; }
+  .field { @apply w-full rounded-lg border border-line-strong bg-background px-3 py-2 text-sm text-foreground placeholder:text-faint focus-visible:outline-offset-1; }
+  .eyebrow { @apply text-[10px] font-bold tracking-[0.15em] text-faint uppercase; }
+  .notice { @apply flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-sm leading-relaxed; }
+  .notice-error { @apply border-danger/25 bg-danger/8 text-danger; }
+  .notice-info { @apply border-accent/15 bg-accent/7 text-accent; }
+  .terminal { @apply max-h-80 overflow-auto rounded-lg border border-line bg-background p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap wrap-anywhere text-muted; }
+}

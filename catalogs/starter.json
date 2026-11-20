@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "runtimes": {
+    "llama-cpu": {
+      "adapter": "llama.cpp",
+      "version": "b12359"
+    },
+    "sd-cuda": {
+      "adapter": "stable-diffusion.cpp",
+      "version": "532d2c15c430a785a712b2d94281f04e733008a4"
+    }
+  },
+  "artifacts": {
+    "qwen2.5-0.5b-instruct-q4-k-m": {
+      "source": {
+        "kind": "hf",
+        "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+        "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+        "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+      },
+      "hashes": {
+        "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+        "blake3": "d4c4d9763127153cc69a63bb3c9df3f2a8db05af4687e5f5bc484cb3bb52608c"
+      },
+      "size": 491400032
+    },
+    "mxbai-embed-xsmall-v1-q8-0": {
+      "source": {
+        "kind": "hf",
+        "repo": "mixedbread-ai/mxbai-embed-xsmall-v1",
+        "revision": "e6ac24e5d6efb8782b59de1647b3ececb4ece94e",
+        "file": "gguf/mxbai-embed-xsmall-v1-q8_0.gguf"
+      },
+      "hashes": {
+        "sha256": "21f9f06af9e4e895fcdcbf6c0d57ca1996fe22da54ecb6cc5f7733d785412d44",
+        "blake3": "d4372cd1de74efb36ffd162c43b7bd096e2abec9d18fdb88256295b5818076ba"
+      },
+      "size": 30784160
+    },
+    "qwen-image-2.1-turbo-q4-k-m": {
+      "source": {
+        "kind": "hf",
+        "repo": "unsloth/Qwen-Image-2.1-Turbo-GGUF",
+        "revision": "bd53e520a64472adaff780da0b2f2d7eb1605e30",
+        "file": "qwen-image-2.1-turbo-Q4_K_M.gguf"
+      },
+      "hashes": {
+        "sha256": "8940e8b522af886e0c0f5afddf720e82dd223cb9a43580b5f61c4d740452ac20",
+        "blake3": "fb63720cc76324c9bd550a306dedb8cb21cd6b041a38db7a74682cd45ea60575"
+      },
+      "size": 4199565120
+    },
+    "qwen3-vl-8b-instruct-ud-q4-k-xl": {
+      "source": {
+        "kind": "hf",
+        "repo": "unsloth/Qwen3-VL-8B-Instruct-GGUF",
+        "revision": "b93a7ee713758252c555be4210c00540df954dc2",
+        "file": "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf"
+      },
+      "hashes": {
+        "sha256": "e3d1a6e87c5cb31e054f2c3bc0dd82ffde052f613de5eef3665b7bd33c9b703e",
+        "blake3": "cde5926ab4c64a0c85304cdfde5b4a8114fad6b028c520ccbbb02898a71e1074"
+      },
+      "size": 5148699488
+    },
+    "qwen3-vl-8b-mmproj-f16": {
+      "source": {
+        "kind": "hf",
+        "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+        "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+        "file": "mmproj-Qwen3VL-8B-Instruct-F16.gguf"
+      },
+      "hashes": {
+        "sha256": "ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38",
+        "blake3": "1a784bbaa32b3768193edd3c9f86b5174881053eac0e93553691dbc7f17e3551"
+      },
+      "size": 1159029824
+    },
+    "qwen-image-2.1-vae-bf16": {
+      "source": {
+        "kind": "hf",
+        "repo": "unsloth/Qwen-Image-2.1-FP8",
+        "revision": "bb21a8ba7f0371c19ad1f72c82a5e8fc10f39939",
+        "file": "vae/qwen_image_2.1_vae_bf16.safetensors"
+      },
+      "hashes": {
+        "sha256": "71879ffd5321e6d10c3c87513e2b474b1252efa7f3dec2969214a9bf06a6dd5c",
+        "blake3": "1e282e8ffe5d1edd3ff5a0f79f80cadcd355a228bd767e6ba19e07442c106496"
+      },
+      "size": 675508656
+    }
+  },
+  "models": {
+    "qwen2.5-chat": {
+      "name": "Qwen2.5 0.5B Instruct · Q4_K_M",
+      "profiles": {
+        "cpu": {
+          "runtime": "llama-cpu",
+          "artifacts": {
+            "model": "qwen2.5-0.5b-instruct-q4-k-m"
+          },
+          "device": "cpu",
+          "host": "127.0.0.1",
+        "port": 8081,
+        "metrics_path": "/metrics",
+        "ram_mib": 1536,
+        "options": {
+          "ctx_size": 2048,
+          "metrics": true,
+            "parallel": 1
+          },
+          "health": {
+            "path": "/health",
+            "timeout_seconds": 60
+          }
+        }
+      },
+      "default_profile": "cpu"
+    },
+    "mxbai-embed-xsmall": {
+      "name": "Mixedbread Embed XSmall v1 · Q8_0",
+      "profiles": {
+        "cpu": {
+          "runtime": "llama-cpu",
+          "artifacts": {
+            "model": "mxbai-embed-xsmall-v1-q8-0"
+          },
+          "device": "cpu",
+          "host": "127.0.0.1",
+        "port": 8082,
+        "metrics_path": "/metrics",
+        "ram_mib": 512,
+        "options": {
+          "ctx_size": 512,
+          "metrics": true,
+            "parallel": 1,
+            "embedding": true,
+            "pooling": "mean"
+          },
+          "health": {
+            "path": "/health",
+            "timeout_seconds": 60
+          }
+        }
+      },
+      "default_profile": "cpu"
+    },
+    "qwen-image-turbo": {
+      "name": "Qwen Image 2.1 Turbo · Q4_K_M",
+      "profiles": {
+        "cuda": {
+          "runtime": "sd-cuda",
+          "artifacts": {
+            "diffusion_model": "qwen-image-2.1-turbo-q4-k-m",
+            "llm": "qwen3-vl-8b-instruct-ud-q4-k-xl",
+            "llm_vision": "qwen3-vl-8b-mmproj-f16",
+            "vae": "qwen-image-2.1-vae-bf16"
+          },
+          "device": "gpu",
+          "host": "127.0.0.1",
+          "port": 8083,
+          "options": {
+            "steps": 8,
+            "cfg_scale": 1.0,
+            "sampling_method": "euler",
+            "sigmas": "qwen-image-2.1-turbo",
+            "flash_attn": "off,diffusion=on",
+            "offload_to_cpu": true,
+            "mmap": true,
+            "vae_tiling": true,
+            "width": 1024,
+            "height": 1024,
+            "threads": 8,
+            "max_pending_jobs": 2
+          },
+          "health": {
+            "path": "/v1/models",
+            "timeout_seconds": 180
+          }
+        }
+      },
+      "default_profile": "cuda"
+    }
+  },
+  "boot": []
+}
