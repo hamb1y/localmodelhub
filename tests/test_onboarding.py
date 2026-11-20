@@ -2,10 +2,14 @@ import contextlib
 import io
 import json
 import os
+import pty
+import select
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,6 +45,7 @@ class OnboardingTests(unittest.TestCase):
         self.enterContext(patch.object(onboarding, "_ai_home", return_value=home))
         self.enterContext(patch.dict(os.environ, {
             "LMH_API_TOKEN": "", "LMH_ENDPOINT": "", "LMH_INFERENCE_ENDPOINT": "", "LMH_INFERENCE_KEY": "",
+            "LMH_SETUP_PANEL_ONLY": "",
         }))
         self.backend = self.enterContext(patch.object(onboarding, "Backend")).return_value
         self.install = self.enterContext(patch.object(onboarding, "install_cpu_runtime", side_effect=self.approve))
@@ -110,6 +115,16 @@ class OnboardingTests(unittest.TestCase):
         self.backend.action.assert_not_called()
         self.install.assert_not_called()
         self.systemctl.assert_not_called()
+        self.smoke.assert_not_called()
+
+    def test_explicit_import_reports_devices_without_starting_anything(self):
+        self.backend.status.return_value = self.status()
+        with patch.dict(os.environ, {"LMH_SETUP_PANEL_ONLY": "1"}):
+            self.assertEqual(onboarding.onboard(self.emit), 0)
+        self.assertTrue(any(event["stage"] == "devices" and "4 logical CPUs" in event["message"]
+                            for event in self.events))
+        self.backend.action.assert_not_called()
+        self.install.assert_not_called()
         self.smoke.assert_not_called()
 
     def test_custom_with_same_ids_but_different_recipe_is_not_started(self):
@@ -259,9 +274,6 @@ class BootstrapHandoffTests(unittest.TestCase):
         self.exec_script("id", "echo ai")
         self.exec_script("curl", "exit 0")
         self.exec_script("sudo", 'echo "unexpected package provisioning" >&2; exit 98')
-        version = next(line.split("=", 1)[1] for line in BOOTSTRAP.read_text().splitlines()
-                       if line.startswith("updater_sha256="))
-        self.exec_script("sha256sum", f"echo '{version}  updater'")
         native = self.home / ".local/share/localmodelhub/current/bin"
         native.mkdir(parents=True)
         self.exec_script(native / "lmh", f"echo \"$1\" > {shlex.quote(str(self.onboard_log))}\n"
@@ -277,14 +289,20 @@ class BootstrapHandoffTests(unittest.TestCase):
         path.write_text("#!/bin/bash\nset -euo pipefail\n" + text + "\n")
         path.chmod(0o700)
 
-    def stub_python(self, updater_exit, *, requires_packages=False):
+    def stub_python(self, installer_exit, *, requires_packages=False):
         prerequisite = f"[[ -f {shlex.quote(str(self.home / 'packages-installed'))} ]]" if requires_packages else ":"
         self.exec_script("python3", f"""
 case "$2" in
     -c) {prerequisite} ;;
     -m) if [[ $3 == venv ]]; then mkdir -p "$4/bin"; cp -- "$0" "$4/bin/python"; fi ;;
-    *) exit {updater_exit} ;;
+    *) exit 99 ;;
 esac
+""")
+        self.exec_script("git", f"""
+[[ ${{@: -2:1}} == https://github.com/hamb1y/localmodelhub.git ]]
+checkout="${{@: -1}}"
+mkdir -p -- "$checkout/deploy"
+printf 'exit %s\\n' '{installer_exit}' > "$checkout/deploy/install.sh"
 """)
 
     def run_bootstrap(self):
@@ -297,13 +315,63 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.onboard_log.read_text(), "onboard\noriginal stdin\n")
 
-    def test_failed_verified_updater_does_not_onboard(self):
+    def test_failed_source_install_does_not_onboard(self):
         self.stub_python(87)
         result = self.run_bootstrap()
         self.assertEqual(result.returncode, 87, result.stderr)
         self.assertFalse(self.onboard_log.exists())
 
-    def test_missing_python_venv_is_installed_before_verified_release(self):
+    def test_interactive_menu_appears_before_host_provisioning(self):
+        self.stub_python(99)
+        child, terminal = pty.fork()
+        if child == 0:
+            os.environ["TERM"] = "xterm-256color"
+            os.execv("/bin/bash", ["/bin/bash", str(self.script)])
+        finished = False
+        try:
+            output = bytearray()
+            deadline = time.monotonic() + 5
+            while b"Import a models.json" not in output and time.monotonic() < deadline:
+                if select.select([terminal], [], [], 0.1)[0]:
+                    output.extend(os.read(terminal, 8192))
+            self.assertIn(b"Detecting inference devices", output)
+            self.assertIn(b"Import a models.json", output)
+            os.write(terminal, b"q\n")
+            while time.monotonic() < deadline:
+                waited, status = os.waitpid(child, os.WNOHANG)
+                if waited:
+                    finished = True
+                    self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+                    break
+                time.sleep(0.01)
+            self.assertTrue(finished)
+            self.assertFalse(self.onboard_log.exists())
+        finally:
+            if not finished:
+                os.kill(child, signal.SIGKILL)
+                os.waitpid(child, 0)
+            os.close(terminal)
+
+    def test_unattended_import_passes_a_private_copy_to_the_installer(self):
+        self.stub_python(0)
+        user_file = self.home / "my models.json"
+        user_file.write_text('{"models": {}}\n')
+        self.exec_script("git", """
+checkout="${@: -1}"
+mkdir -p -- "$checkout/deploy"
+cat > "$checkout/deploy/install.sh" <<'SH'
+set -euo pipefail
+[[ $1 == --setup && $2 == import && $3 == --catalog ]]
+[[ $(stat -c %a "$4") == 600 ]]
+grep -Fq '{"models": {}}' "$4"
+SH
+""")
+        result = subprocess.run(["/bin/bash", self.script, "--catalog", user_file],
+                                input="original stdin\n", capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.onboard_log.read_text(), "onboard\noriginal stdin\n")
+
+    def test_missing_python_venv_is_installed_before_source_build(self):
         self.stub_python(0, requires_packages=True)
         self.exec_script("apt-get", "exit 99")
         sudo_log = self.home / "sudo"

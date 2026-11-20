@@ -1095,6 +1095,7 @@ fn stage_name(stage: &str) -> &str {
     match stage {
         "account" => "Account",
         "backend" => "Local panel",
+        "devices" => "Inference devices",
         "catalog" => "Starter catalog",
         "host" => "Host checks",
         "runtime" => "CPU runtime",
@@ -1136,20 +1137,23 @@ fn draw_onboarding(frame: &mut Frame<'_>, stages: &[Progress], elapsed: Duration
     } else {
         let lines: Vec<_> = stages
             .iter()
-            .map(|stage| {
+            .flat_map(|stage| {
                 let marker = match stage.state.as_str() {
                     "ok" => "✓",
                     "error" | "failed" => "×",
                     "working" => spinner,
                     _ => "•",
                 };
-                Line::from(vec![
+                let mut message = stage.message.lines();
+                let first = Line::from(vec![
                     Span::styled(
                         format!("{marker}  {}", clean(stage_name(&stage.stage))),
                         state_style(&stage.state),
                     ),
-                    Span::raw(format!(" — {}", clean(&stage.message))),
-                ])
+                    Span::raw(format!(" — {}", clean(message.next().unwrap_or("")))),
+                ]);
+                std::iter::once(first)
+                    .chain(message.map(|line| Line::raw(format!("    {}", clean(line)))))
             })
             .collect();
         let max_rows = usize::from(progress.height);

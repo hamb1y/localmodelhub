@@ -24,14 +24,16 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 systemctl --user show-environment >/dev/null
 ```
 
-## Manual release install (advanced)
+## Manual source install (advanced)
 
-The host needs systemd 254+, Python 3.11+, Bash, `tar`, coreutils and `flock`.
+The host needs systemd 254+, Git, a C toolchain, Python 3.11+, Bash, `curl`,
+coreutils and `flock`.
 Managed runtime units use `systemd-run --expand-environment=no` so systemd
 does not expand model arguments. Install Python's `venv`/`ensurepip` support
 (for example `python3-venv` on Debian/Ubuntu), or install `uv` alongside
 Python. The installer uses `uv` if present, otherwise `venv` and `pip`.
-Dependencies come from your Python package index or configured mirror.
+It builds the app locally with Cargo and Bun, provisioning them privately
+as needed. Dependencies come from the checked-in lockfiles.
 
 If you aren't using the quick-start installer, prepare the account as an
 administrator:
@@ -45,19 +47,16 @@ Linger starts the user manager at boot and keeps it running after logout.
 Give `ai` only the access needed to read model files, run approved binaries,
 and use configured devices. Do not give the service account root privileges.
 
-Get `localmodelhub.tar.gz` from the
-[official releases](https://github.com/hamb1y/localmodelhub/releases) and
-verify its SHA-256 against the trusted release checksum before unpacking.
-As `ai`, in a directory writable by that account:
+As `ai`, clone the official source and install it:
 
 ```bash
-tar -xzf localmodelhub.tar.gz
+git clone --depth 1 https://github.com/hamb1y/localmodelhub.git
 cd localmodelhub
 bash deploy/install.sh
 curl --fail --retry 5 --retry-connrefused http://127.0.0.1:5100/api/health
 ```
 
-You can remove the downloaded archive after installation.
+You can remove the checkout after installation.
 
 This low-level installer does not run the bootstrap’s starter onboarding.
 On first install, the starter catalog provides profiles but has no boot
@@ -65,7 +64,7 @@ actions. Pass `--catalog FILE` to seed a reviewed local catalog instead, or
 `--catalog deploy/example-catalog.json` for an empty panel. Reinstalling
 does not overwrite the existing catalog, credentials, policy, unit drop-ins,
 or application state. A normal install enables the user service and restarts
-it when activating a different release. For staging checks in a disposable
+it when activating a different Git commit. For staging checks in a disposable
 home, `--no-systemd` installs files without talking to the service manager.
 
 | Purpose | Default path under `ai`’s home |
@@ -244,12 +243,13 @@ systemctl --user restart localmodelhub.service
 
 ## Updates and removal
 
-Run `lmh update` as `ai` to check for an update manually. To turn off future
-scheduled checks, run `systemctl --user disable --now localmodelhub-update.timer`
-as `ai`. Back up the catalog, policy and state before upgrading. To install
-an earlier release, verify it and run that release's installer; downgrading
-does not undo stored configuration or state changes. Reinstall after a Python
-minor-version upgrade to rebuild the environment.
+Run `lmh update` as `ai` to check the official Git `main` manually. The app
+builds a changed commit before switching to it and keeps the current copy if
+the build fails. It doesn't start or replace models. To stop scheduled checks,
+run `systemctl --user disable --now localmodelhub-update.timer` as `ai`.
+If your app was installed from an old archive, rerun the public installer
+once to switch it to source installs. Rerun it after a Python minor-version
+upgrade to rebuild the environment.
 
 Stop running profiles explicitly before taking the panel offline if you
 also want inference stopped: managed models have separate user units.

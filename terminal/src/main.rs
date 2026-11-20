@@ -82,7 +82,7 @@ enum Command {
         #[arg(long)]
         catalog: PathBuf,
     },
-    /// Check for and install a newer stable LocalModelHub release.
+    /// Check for and install a newer LocalModelHub commit from Git.
     Update,
     /// Remove LocalModelHub from the ai account.
     Uninstall {

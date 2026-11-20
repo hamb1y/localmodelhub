@@ -10,13 +10,66 @@ die() {
 }
 
 if [[ $# == 1 && ( $1 == --help || $1 == -h ) ]]; then
-    echo 'Usage: bash install.sh'
-    echo 'Install the latest stable LocalModelHub release and start its public CPU starter as ai.'
+    echo 'Usage: bash install.sh [--catalog FILE | --starter | --keep]'
+    echo 'Install LocalModelHub from Git and start its public CPU starter as ai.'
     echo 'Run as ai (with linger already enabled) or as an administrator with sudo.'
     exit 0
 fi
-(( $# == 0 )) || die 'this bootstrap takes no arguments; see --help.'
+choice=
+catalog_file=
+case $# in
+    0) ;;
+    1) case "$1" in --starter) choice=starter ;; --keep) choice=keep ;; *) die 'see --help.' ;; esac ;;
+    2) [[ $1 == --catalog && -n $2 ]] || die 'see --help.'
+       choice=import; catalog_file=$2 ;;
+    *) die 'see --help.' ;;
+esac
 (( EUID != 0 )) || die 'run as ai or as a non-root administrator with sudo.'
+
+stage() {
+    if [[ -t 2 && ${TERM:-dumb} != dumb ]]; then
+        printf '\n\033[1m› %s\033[0m\n' "$*" >&2
+    else
+        printf '\n› %s\n' "$*" >&2
+    fi
+}
+if [[ -t 1 && ${TERM:-dumb} != dumb ]] && { exec 3<>/dev/tty; } 2>/dev/null; then
+    printf '\n\033[48;2;34;90;56m\033[97;1m  LOCALMODELHUB  /  SETUP  \033[0m\n' >&3
+    printf '\n  Detecting inference devices…\n' >&3
+    awk -F: '/^(model name|Hardware|Processor)[[:space:]]*:/ {sub(/^ +/,"",$2); print "  CPU       " $2; exit}' /proc/cpuinfo >&3
+    awk '/^MemTotal:/ {printf "  RAM       %.1f GiB\n", $2 / 1048576}' /proc/meminfo >&3
+    if command -v lspci >/dev/null; then
+        lspci | awk 'tolower($0) ~ /vga|3d controller|display controller|processing accelerators|neural/ {print "  Device    " $0}' >&3
+    else
+        for device in /sys/bus/pci/devices/*; do
+            [[ -r $device/class ]] || continue
+            read -r class < "$device/class" || continue
+            case "$class" in
+                0x03*|0x12*) printf '  Device    PCI %s [%s:%s]\n' "${device##*/}" "$(< "$device/vendor")" "$(< "$device/device")" >&3 ;;
+            esac
+        done
+    fi
+    if [[ -z $choice ]]; then
+        printf '\n  [1] Keep existing models (or start with the CPU starter)\n  [2] Import a models.json file\n  [3] Use the CPU starter (back up existing config)\n  [q] Quit\n\n' >&3
+        while true; do
+            read -r -p '  Select [1]: ' answer <&3 2>&3 || exit 130
+            case "$answer" in
+                ''|1) choice=keep; break ;;
+                2) choice=import; read -r -e -p '  Path to models.json: ' catalog_file <&3 2>&3 || exit 130; break ;;
+                3) choice=starter; break ;;
+                q|Q) exit 0 ;;
+                *) printf '  Choose 1, 2, 3, or q.\n' >&3 ;;
+            esac
+        done
+    fi
+    exec 3>&-
+fi
+choice=${choice:-keep}
+if [[ $choice == import ]]; then
+    [[ $catalog_file != '~/'* ]] || catalog_file="$HOME/${catalog_file:2}"
+    [[ -f $catalog_file && -r $catalog_file ]] || die 'choose a readable models.json file.'
+fi
+stage 'Preparing the host'
 for executable in curl bash sha256sum getent systemctl loginctl; do
     command -v "$executable" >/dev/null || die "$executable is required."
 done
@@ -35,22 +88,38 @@ python_ready() (
         "$probe/venv/bin/python" -I -m pip --version >/dev/null 2>&1
 )
 
-if ! python_ready; then
-    command -v sudo >/dev/null || die 'Python 3.11+ with venv (including ensurepip) is required; rerun as an administrator with sudo.'
+need_python=false
+need_git=false
+need_cc=false
+python_ready || need_python=true
+command -v git >/dev/null || need_git=true
+command -v cc >/dev/null || need_cc=true
+if "$need_python" || "$need_git" || "$need_cc"; then
+    command -v sudo >/dev/null || die 'Git, a C toolchain, and Python 3.11+ with venv are required; rerun as an administrator with sudo.'
+    packages=()
     if command -v apt-get >/dev/null; then
+        if "$need_python"; then packages+=(python3 python3-venv); fi
+        if "$need_git"; then packages+=(git); fi
+        if "$need_cc"; then packages+=(build-essential); fi
         sudo -- apt-get update &&
-            sudo -- apt-get install -y python3 python3-venv ||
-            die 'apt could not install Python and venv; check your package repositories and retry.'
+            sudo -- apt-get install -y "${packages[@]}" ||
+            die 'apt could not install the build prerequisites.'
     elif command -v dnf >/dev/null; then
-        sudo -- dnf install -y python3 python3-pip ||
-            die 'dnf could not install Python and venv; check your package repositories and retry.'
+        if "$need_python"; then packages+=(python3 python3-pip); fi
+        if "$need_git"; then packages+=(git); fi
+        if "$need_cc"; then packages+=(gcc glibc-devel); fi
+        sudo -- dnf install -y "${packages[@]}" || die 'dnf could not install the build prerequisites.'
     elif command -v pacman >/dev/null; then
-        sudo -- pacman -S --needed --noconfirm python python-pip ||
-            die 'pacman could not install Python and venv; check your package repositories and retry.'
+        if "$need_python"; then packages+=(python python-pip); fi
+        if "$need_git"; then packages+=(git); fi
+        if "$need_cc"; then packages+=(base-devel); fi
+        sudo -- pacman -S --needed --noconfirm "${packages[@]}" ||
+            die 'pacman could not install the build prerequisites.'
     else
-        die 'Python 3.11+ with venv (including ensurepip) is required; no supported package manager was found.'
+        die 'Install Git, a C toolchain, and Python 3.11+ with venv; no supported package manager was found.'
     fi
-    python_ready || die 'The distro packages did not provide Python 3.11+ with venv; use a supported distro release.'
+    python_ready && command -v git >/dev/null && command -v cc >/dev/null ||
+        die 'The distro packages did not provide Git, cc, and Python 3.11+ with venv.'
 fi
 
 if ! entry=$(getent passwd ai); then
@@ -74,11 +143,25 @@ if [[ $EUID != "$ai_uid" ]]; then
     command -v sudo >/dev/null || die 'sudo is required to switch to the ai account.'
     runner=(sudo -H -u ai --)
 fi
-# Keep this content pin in sync with lmh/update.py (checked by tests/test_update.py).
-updater_sha256=e63465bb7bf884d35cb03d469600c8bd45dc96704e743eec8e4380bf7535ec73
+staged_catalog=
+if [[ $choice == import ]]; then
+    stage 'Reading your models.json'
+    staged_catalog=$(head -c 1048577 -- "$catalog_file" | "${runner[@]}" /bin/bash --noprofile --norc -c '
+        set -euo pipefail
+        umask 077
+        file=$(mktemp /tmp/localmodelhub-catalog.XXXXXXXXXX)
+        trap '\''rm -f -- "$file"'\'' EXIT
+        cat > "$file"
+        (( $(wc -c < "$file") <= 1048576 )) || { echo "models.json exceeds 1 MiB." >&2; exit 1; }
+        printf "%s\n" "$file"
+        trap - EXIT
+    ')
+    trap '"${runner[@]}" /usr/bin/rm -f -- "$staged_catalog"' EXIT
+fi
+stage 'Cloning LocalModelHub and building the app'
 "${runner[@]}" /usr/bin/env -i PATH="$PATH" HOME="$ai_home" \
     XDG_RUNTIME_DIR="/run/user/$ai_uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$ai_uid/bus" \
-    /bin/bash --noprofile --norc -s -- "$updater_sha256" <<'BOOTSTRAP'
+    /bin/bash --noprofile --norc -s -- "$choice" "$staged_catalog" <<'BOOTSTRAP'
 set -euo pipefail
 umask 077
 (( EUID != 0 )) && [[ $(id -un) == ai ]] || exit 1
@@ -92,25 +175,26 @@ if (( attempt == 10 )); then
     echo 'LocalModelHub bootstrap: no ai user systemd manager; verify linger and try again.' >&2
     exit 1
 fi
-temp=$(mktemp -d /tmp/localmodelhub-bootstrap.XXXXXXXXXX)
+data="$HOME/.local/share/localmodelhub"
+mkdir -p -- "$data"
+exec 7>"$data/update.lock"
+flock 7
+temp=$(mktemp -d "$data/.bootstrap.XXXXXXXXXX")
 trap 'rm -rf -- "$temp"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-(
-    # Older curl cannot always enforce --max-filesize on streamed responses.
-    ulimit -f 128
-    curl --disable --proto '=https' --globoff --fail --silent --show-error \
-        --connect-timeout 10 --max-time 30 --max-filesize 65536 \
-        --output "$temp/update.py" \
-        --url https://raw.githubusercontent.com/hamb1y/localmodelhub/main/lmh/update.py
-)
-read -r actual _ < <(sha256sum -- "$temp/update.py")
-if [[ $actual != "$1" ]]; then
-    echo 'LocalModelHub bootstrap: updater checksum mismatch; download a fresh install.sh and retry.' >&2
-    exit 1
-fi
-python3 -I "$temp/update.py" --bootstrap
+GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+    git -c http.followRedirects=false clone --depth 1 --single-branch --branch main \
+    https://github.com/hamb1y/localmodelhub.git "$temp/source"
+case "$1" in
+    import) bash "$temp/source/deploy/install.sh" --setup import --catalog "$2" ;;
+    starter|keep) bash "$temp/source/deploy/install.sh" --setup "$1" ;;
+esac
 BOOTSTRAP
+if [[ -n $staged_catalog ]]; then
+    "${runner[@]}" /usr/bin/rm -f -- "$staged_catalog"
+    trap - EXIT
+fi
 
 if [[ $EUID != "$ai_uid" ]]; then
     # Install a launcher from this script, never from the ai-owned release.
@@ -194,7 +278,9 @@ if [[ $EUID != "$ai_uid" ]]; then
     [[ -z ${LMH_INFERENCE_KEY:-} ]] || runner+=(--preserve-env=LMH_INFERENCE_KEY)
     runner+=(--)
 fi
-onboard=("${runner[@]}" /usr/bin/env PATH="$PATH" HOME="$ai_home"
+panel_only=0
+[[ $choice != import ]] || panel_only=1
+onboard=("${runner[@]}" /usr/bin/env PATH="$PATH" HOME="$ai_home" LMH_SETUP_PANEL_ONLY="$panel_only"
          XDG_RUNTIME_DIR="/run/user/$ai_uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$ai_uid/bus"
          "$ai_home/.local/share/localmodelhub/current/bin/lmh" onboard)
 # The provisioning heredocs are finished. Redirect only at the final exec so

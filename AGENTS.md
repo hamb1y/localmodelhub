@@ -16,8 +16,8 @@ runtime. See [README.md](README.md) for the user workflow.
 - **Imports are data.** Keep runtime approvals, local paths, and credentials
   outside portable imports. Check pinned artifact bytes against declared
   digests. An imported catalog can be staged, not executed immediately.
-- **Updates replace the app, not inference.** Ship stable, verified release
-  artifacts. Preserve local config, jobs, caches, and running engine units.
+- **Updates replace the app, not inference.** Build the official Git checkout
+  before activating it. Preserve local config, jobs, caches, and running engine units.
   Uninstall stops only LocalModelHub-owned units; never remove adopted services
   or externally referenced model files.
 - **Metrics are evidence.** Keep unreported values distinct from zero. Store
@@ -33,9 +33,9 @@ runtime. See [README.md](README.md) for the user workflow.
   Rust/Ratatui `terminal/`. Keep lifecycle behavior in the backend.
 - **Onboarding:** `install.sh` and `lmh/onboarding.py` provision and test
   the starter through an additive Start. App updates never call onboarding.
-- **Releases:** the root `install.sh` is the public entry point;
-  `deploy/` packages the verified application and systemd files. Keep
-  `pyproject.toml`, `lmh/__init__.py`, `terminal/Cargo.toml`, and the stable tag in sync.
+- **Install from source:** `install.sh` and `lmh/update.py` fetch Git `main`;
+  `deploy/install.sh` builds and activates the commit. Keep Python and Rust
+  version strings in sync. Do not require GitHub release artifacts.
 
 ## Verify before shipping
 
@@ -47,7 +47,7 @@ runtime. See [README.md](README.md) for the user workflow.
    there is no local Chromium.
 3. For terminal changes, run `cargo fmt --check`, `cargo clippy --locked
    --all-targets -- -D warnings`, and `cargo test --locked` in `terminal/`.
-4. For install or update changes, build `bash deploy/build-release.sh --build-ui`
-   and test in an isolated home or with a systemd test double. Never exercise
+4. For install or update changes, test `bash deploy/install.sh --no-systemd`
+   from a clean checkout and an isolated home. Never exercise
    destructive deployment paths against someone’s running inference without
    explicit approval.

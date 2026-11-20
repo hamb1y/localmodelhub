@@ -1,0 +1,40 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.3'
+      - name: Backend and installer
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install .
+          .venv/bin/python -m unittest discover -s tests -v
+          for script in install.sh deploy/*.sh; do bash -n "$script"; done
+      - name: Terminal
+        working-directory: terminal
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
+          cargo +1.88.0 fmt --check
+          cargo +1.88.0 clippy --locked --all-targets -- -D warnings
+          cargo +1.88.0 test --locked
+      - name: Web panel
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun --bun run check
+          bun --bun run build

@@ -124,3 +124,25 @@ def snapshot() -> dict:
         "ram_available_bytes": available,
         "gpus": _nvidia_gpus(),
     }
+
+
+def detected_accelerators(cuda_available=False, pci=Path("/sys/bus/pci/devices"),
+                          accel=Path("/sys/class/accel")) -> list[str]:
+    """List detected GPUs/accelerators without claiming runtime compatibility."""
+    vendors = {"0x10de": "NVIDIA", "0x1002": "AMD", "0x8086": "Intel",
+               "0x13b5": "Arm", "0x17cb": "Qualcomm"}
+    result = []
+    for device in sorted(pci.glob("*")):
+        kind = _proc_text(device / "class").strip()
+        if kind[:4] not in {"0x03", "0x12"}:
+            continue
+        vendor = _proc_text(device / "vendor").strip()
+        if vendor == "0x10de" and cuda_available:
+            continue  # NVIDIA cards with measured VRAM are already listed by CUDA UUID.
+        model = _proc_text(device / "device").strip()
+        category = "GPU" if kind.startswith("0x03") else "accelerator"
+        result.append(f"{vendors.get(vendor, vendor or 'Unknown')} {category} {model} ({device.name})")
+    for device in sorted(accel.glob("accel*")):
+        driver = (device / "device/driver").resolve().name
+        result.append(f"Linux accelerator {device.name} ({driver})")
+    return result

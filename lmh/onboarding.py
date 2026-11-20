@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from .api import INFERENCE_PORT, PANEL_PORT, _credential
 from .catalog import load_catalog
 from .controller import MIB, _catalog_digest, _check_config
+from .hardware import detected_accelerators
 from .runtime_install import _read_policy, install_cpu_runtime
 
 
@@ -299,6 +300,25 @@ def onboard(emit) -> int:
         backend = Backend(dashboard, timeout=4, token=token)
         status = _panel_status(backend, dashboard)
         emit(stage, "ok", "Panel is ready.")
+        hardware = status["hardware"]
+        stage = "devices"
+        gib = 1024**3
+        ram = hardware.get("ram_total_bytes")
+        cpu = hardware.get("cpu") or f"{hardware.get('cpu_logical_count') or '?'} logical CPUs"
+        cuda = hardware.get("gpus", [])
+        available = [f"{gpu['name']} ({gpu['free_bytes'] / gib:.1f}/{gpu['total_bytes'] / gib:.1f} GiB free VRAM)"
+                     for gpu in cuda]
+        detected = detected_accelerators(bool(cuda))
+        summary = [f"CPU: {cpu}" + (f" · {ram / gib:.1f} GiB RAM" if ram else "")]
+        summary.extend(available)
+        summary.extend(f"{device} (detected; runtime not verified)" for device in detected)
+        if not available and not detected:
+            summary.append("No GPU or accelerator detected; CPU inference is available.")
+        emit(stage, "ok", "\n".join(summary))
+        if os.environ.get("LMH_SETUP_PANEL_ONLY") == "1":
+            emit("done", "ok", "Panel is ready. Imported models were not started by onboarding.",
+                 dashboard=dashboard)
+            return 0
 
         stage = "catalog"
         entry = _entry(status)

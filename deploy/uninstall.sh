@@ -61,6 +61,6 @@ if "$purge"; then
     echo "LocalModelHub and its settings, history, and private cache were removed."
 else
     rm -f -- "$data/current" "$data/.systemd-release"
-    rm -rf -- "$data/releases"
+    rm -rf -- "$data/releases" "$data/build"
     echo "LocalModelHub was removed. Its local configuration and inference cache were kept."
 fi

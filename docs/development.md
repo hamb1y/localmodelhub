@@ -1,26 +1,14 @@
 # Build and test LocalModelHub
 
-Build from a checkout. A release includes a native Rust `lmh` CLI and
-Ratatui terminal UI; use a Rust toolchain on the build machine and build for
-the target Linux architecture (x86_64 or aarch64). If `web/build/` already
-contains a complete static web build, package it without invoking Node:
+The app is installed from a Git checkout, not a release archive. Build and
+test each part from the repository root:
 
 ```bash
-bash deploy/build-release.sh
+cargo test --manifest-path terminal/Cargo.toml --locked
+(cd web && bun install --frozen-lockfile && bun --bun run check && bun --bun run build)
 ```
 
-To build the UI and package it, install Node 22.12+, npm, and Bun on the
-build machine. The build installs from the checked-in Bun lockfile in frozen
-mode:
-
-```bash
-bash deploy/build-release.sh --build-ui
-```
-
-Both commands produce `dist/localmodelhub.tar.gz` by default and print its
-SHA-256. A release needs the Python backend, native `lmh` executable, static
-web assets, catalogs, deployment files, and a checksum manifest. The
-target host needs neither a checkout nor a Node.js or Rust toolchain.
+With Chromium installed, `cd web && bun test` also runs the browser check.
 
 ## Run the Python tests
 
@@ -32,11 +20,10 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests
 ```
 
-## Smoke-test the release
+## Smoke-test a source install
 
-Verify and extract the archive, change into the extracted `localmodelhub/`
-directory, and install into a temporary home. This does not enable or start
-any service:
+From a clean checkout, install into a temporary home without enabling or
+starting any service:
 
 ```bash
 test_home=$(mktemp -d)
@@ -47,7 +34,7 @@ prefix="$test_home/.local/share/localmodelhub/current"
 test -s "$prefix/web/build/index.html"
 ```
 
-The archive smoke test does not exercise the one-step bootstrap. On a
+The temporary-home smoke test doesn't exercise the one-step bootstrap. On a
 disposable supported Linux host, test that the bootstrap installs the
 dependencies and CPU runtime, downloads and verifies the public starter,
 and succeeds at a real chat request on port 5101. Check that an interactive

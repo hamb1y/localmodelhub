@@ -12,9 +12,13 @@ user with `sudo`. You’ll need `curl` and an internet connection.
 curl -fsS https://raw.githubusercontent.com/hamb1y/localmodelhub/main/install.sh -o localmodelhub-install.sh && bash localmodelhub-install.sh
 ```
 
-On a fresh install, the script sets up the `ai` user, installs llama.cpp,
-downloads and starts Qwen2.5 0.5B (about 491 MB), and verifies a real chat
-request. No GPU, Hugging Face login, or follow-up setup required.
+Setup opens in your terminal, detects inference devices, and lets you keep,
+import, or replace `models.json`. On a fresh install, the default builds the
+app from Git as `ai`, installs llama.cpp, and starts and verifies Qwen2.5
+0.5B (about 491 MB). No GPU or Hugging Face login needed.
+
+For unattended setup, pass `--catalog FILE` to import or `--starter` to
+select the bundled catalog and back up your existing file.
 
 - **Web:** [http://127.0.0.1:5100](http://127.0.0.1:5100)
 - **OpenAI API:** `http://127.0.0.1:5101/v1`, model `qwen2.5-chat`
@@ -43,6 +47,5 @@ The web panel includes Agave Nerd Font; select it in your terminal settings
 if you want the same font in the TUI.
 
 [Configuration and operations](docs/configuration.md) ·
-[Releases](https://github.com/hamb1y/localmodelhub/releases) ·
 [Build and test](https://github.com/hamb1y/localmodelhub/blob/main/docs/development.md) ·
 [MIT license](LICENSE)

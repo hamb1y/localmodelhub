@@ -1,5 +1,5 @@
 [Unit]
-Description=Check for a newer official LocalModelHub app release
+Description=Update LocalModelHub from the official Git checkout
 
 [Service]
 Type=oneshot
