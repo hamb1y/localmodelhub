@@ -1,7 +1,9 @@
 # LocalModelHub
 
-Run local AI models on Linux. Manage them with the web panel or the `lmh`
-terminal UI, and call them through one OpenAI-compatible API.
+**Docker for local AI inference.** Define your models and runtimes in one
+`models.json`, manage them from the web panel or `lmh` terminal UI, and call
+them through one OpenAI-compatible API. LocalModelHub runs natively on Linux;
+no Docker or containers required.
 
 ## Install
 
@@ -45,6 +47,13 @@ on the draft. Don't apply it or start anything without asking.
 Troubleshoot with `lmh doctor`. Remove with `lmh uninstall`.
 The web panel includes Agave Nerd Font; select it in your terminal settings
 if you want the same font in the TUI.
+
+## Feedback welcome
+
+Tried it? Tell us what worked, what got in your way, or what you’d like to
+see next. Requests for models, runtimes, and hardware support are welcome.
+[Open an issue](https://github.com/hamb1y/localmodelhub/issues/new) to share
+a suggestion or report a bug.
 
 [Configuration and operations](docs/configuration.md) ·
 [Build and test](https://github.com/hamb1y/localmodelhub/blob/main/docs/development.md) ·
