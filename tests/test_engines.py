@@ -8,12 +8,21 @@ from lmh.engines import build_launch
 
 
 GPU = "GPU-a1234567-1234-1234-1234-0123456789ab"
+GPU2 = "GPU-b1234567-1234-1234-1234-0123456789ab"
 LLAMA_IMAGE = "ghcr.io/example/llama.cpp:server@sha256:" + "a" * 64
 SD_IMAGE = "ghcr.io/example/stable-diffusion.cpp:cuda@sha256:" + "b" * 64
+CONTAINER_IMAGE = "ghcr.io/example/openai-server:latest@sha256:" + "c" * 64
 LLAMA = {"adapter": "llama.cpp", "image": LLAMA_IMAGE}
 LLAMA_PIN = {**LLAMA, "version": "b12359"}
 SD = {"adapter": "stable-diffusion.cpp", "image": SD_IMAGE}
 NATIVE = {"adapter": "native", "executable": "/opt/native"}
+GENERIC = {
+    "adapter": "container",
+    "image": CONTAINER_IMAGE,
+    "executable": "/app/openai-server",
+    "argv": ["--host", "{host}", "--port", "{port}", "--model", "{artifact:weights}"],
+    "env": {"VLLM_LOGGING_LEVEL": "INFO", "EMPTY_VALUE": ""},
+}
 MODEL = {"model": Path("/models/name with spaces.gguf")}
 
 
@@ -70,14 +79,117 @@ class EngineTests(unittest.TestCase):
             MODEL, gpu_id=GPU,
         )
         self.assertEqual(launch.env["CUDA_VISIBLE_DEVICES"], GPU)
-        self.assertIn("--device=nvidia.com/gpu=all", launch.argv)
+        self.assertIn(f"--device=nvidia.com/gpu={GPU}", launch.argv)
         self.assertIn(f"--env=CUDA_VISIBLE_DEVICES={GPU}", launch.argv)
+        self.assertIn(f"--env=NVIDIA_VISIBLE_DEVICES={GPU}", launch.argv)
+        self.assertFalse(any("=all" in arg for arg in launch.argv))
         flags = dict(zip(engine(launch)[::2], engine(launch)[1::2]))
         self.assertEqual(flags["--device"], "CUDA0")
         self.assertEqual(flags["--split-mode"], "none")
         self.assertEqual(flags["--n-gpu-layers"], "30")
         self.assertEqual(flags["--load-mode"], "mmap")
         self.assertEqual(flags["--threads"], "5")
+
+    def test_generic_container_cpu_expands_tokens_and_limits_cpus(self):
+        launch = build_launch(
+            GENERIC,
+            {"device": "cpu", "port": 8099, "resources": {"cpu_count": 4}},
+            {"weights": [Path("/models/a model"), Path("/models/b")]},
+            identity="vllm\0cpu",
+        )
+        self.assertEqual(engine(launch), (
+            "/app/openai-server", "--host", "127.0.0.1", "--port", "8099",
+            "--model", "/models/a model", "/models/b",
+        ))
+        self.assertEqual(launch.container.image, CONTAINER_IMAGE)
+        self.assertEqual(launch.container.gpus, ())
+        self.assertEqual(launch.health_url, "http://127.0.0.1:8099/health")
+        self.assertIn("--cpus=4", launch.argv)
+        self.assertFalse(any(arg.startswith("--device=") for arg in launch.argv))
+        self.assertIn("--env=CUDA_VISIBLE_DEVICES=", launch.argv)
+        self.assertIn("--env=NVIDIA_VISIBLE_DEVICES=", launch.argv)
+        self.assertIn("--env=VLLM_LOGGING_LEVEL=INFO", launch.argv)
+        self.assertIn("--env=EMPTY_VALUE=", launch.argv)
+        # Container environment belongs to the engine, not the Podman client.
+        self.assertNotIn("VLLM_LOGGING_LEVEL", launch.env)
+        self.assertEqual(launch.env["CUDA_VISIBLE_DEVICES"], "")
+
+    def test_generic_container_gpu_expands_the_selected_uuid(self):
+        runtime = {**GENERIC, "argv": ["--host", "{host}", "--port", "{port}",
+                                       "--visible", "{gpu}"]}
+        launch = build_launch(runtime, {"device": "gpu", "port": 8099}, {}, gpu_id=GPU)
+        self.assertEqual(engine(launch)[-2:], ("--visible", GPU))
+        self.assertEqual(launch.container.gpus, (GPU,))
+        self.assertIn(f"--device=nvidia.com/gpu={GPU}", launch.argv)
+        self.assertIn(f"--env=CUDA_VISIBLE_DEVICES={GPU}", launch.argv)
+        self.assertIn(f"--env=NVIDIA_VISIBLE_DEVICES={GPU}", launch.argv)
+
+    def test_generic_container_multi_gpu_passes_only_selected_devices(self):
+        runtime = {**GENERIC, "argv": ["--port", "{port}", "--gpus", "{gpu}"]}
+        launch = build_launch(
+            runtime, {"device": "gpu", "gpu": [GPU, GPU2], "port": 8099},
+            {}, gpu_id=[GPU, GPU2],
+        )
+        self.assertEqual(launch.container.gpus, (GPU, GPU2))
+        self.assertEqual(engine(launch)[-2:], ("--gpus", f"{GPU},{GPU2}"))
+        self.assertEqual([arg for arg in launch.argv if arg.startswith("--device=")], [
+            f"--device=nvidia.com/gpu={GPU}", f"--device=nvidia.com/gpu={GPU2}",
+        ])
+        self.assertIn(f"--env=CUDA_VISIBLE_DEVICES={GPU},{GPU2}", launch.argv)
+        self.assertIn(f"--env=NVIDIA_VISIBLE_DEVICES={GPU},{GPU2}", launch.argv)
+        self.assertFalse(any("=all" in arg for arg in launch.argv))
+
+    def test_typed_adapters_keep_exactly_one_gpu(self):
+        for runtime in (LLAMA, SD):
+            with self.subTest(runtime=runtime["adapter"]), \
+                    self.assertRaisesRegex(ValueError, "exactly one GPU"):
+                build_launch(runtime, {"device": "gpu", "gpu": [GPU, GPU2]}, MODEL,
+                             gpu_id=[GPU, GPU2])
+
+    def test_cpu_only_container_defaults_to_all_host_cpus_and_explicit_limit_wins(self):
+        launch = build_launch(
+            {**GENERIC, "argv": ["--port", "{port}"]}, {"device": "cpu", "port": 8099},
+            {}, cpu_count=12,
+        )
+        self.assertIn("--cpus=12", launch.argv)
+        limited = build_launch(
+            {**GENERIC, "argv": ["--port", "{port}"]},
+            {"device": "cpu", "port": 8099, "resources": {"cpu_count": 3}}, {}, cpu_count=12,
+        )
+        self.assertIn("--cpus=3", limited.argv)
+        self.assertNotIn("--cpus=12", limited.argv)
+        # GPU containers do not inherit the CPU-only default.
+        gpu = build_launch(
+            {**GENERIC, "argv": ["--port", "{port}"]}, {"device": "gpu", "port": 8099},
+            {}, gpu_id=GPU, cpu_count=12,
+        )
+        self.assertFalse(any(arg.startswith("--cpus=") for arg in gpu.argv))
+        limited_gpu = build_launch(
+            {**GENERIC, "argv": ["--port", "{port}"]},
+            {"device": "gpu", "port": 8099, "resources": {"cpu_count": 2}},
+            {}, gpu_id=GPU, cpu_count=12,
+        )
+        self.assertIn("--cpus=2", limited_gpu.argv)
+
+    def test_generic_container_validates_command_environment_and_port(self):
+        profile = {"device": "cpu", "port": 8099}
+        for runtime, message in (
+            ({**GENERIC, "image": "ghcr.io/example/server:latest"}, "pinned"),
+            ({**GENERIC, "executable": "server"}, "absolute"),
+            ({**GENERIC, "argv": "not-a-list"}, "argv"),
+            ({**GENERIC, "env": {"bad-key": "x"}}, "environment key"),
+            ({**GENERIC, "env": {"CUDA_VISIBLE_DEVICES": "0"}}, "managed"),
+            ({**GENERIC, "options": {"threads": 2}}, "container options"),
+            ({**GENERIC, "cwd": "/app"}, "unsupported runtime fields"),
+        ):
+            with self.subTest(runtime=runtime), self.assertRaisesRegex(ValueError, message):
+                build_launch(runtime, profile, {"weights": Path("/models/weights")})
+        with self.assertRaisesRegex(ValueError, "require a port"):
+            build_launch(GENERIC, {"device": "cpu"}, {})
+        with self.assertRaisesRegex(ValueError, "requires a GPU"):
+            build_launch({**GENERIC, "argv": ["{gpu}"]}, profile, {})
+        with self.assertRaisesRegex(ValueError, "not a profile field"):
+            build_launch(GENERIC, {**profile, "argv": []}, {})
 
     def test_container_command_can_override_the_image_entrypoint(self):
         launch = build_launch(
@@ -88,14 +200,14 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(engine(launch)[:3], ("/sd-server", "--listen-ip", "127.0.0.1"))
         self.assertEqual(launch.argv[launch.argv.index(SD_IMAGE) + 1], "/sd-server")
 
-    def test_gpu_selector_is_required_and_single(self):
-        for selector in (None, "", "-1", "0,1", "GPU-a123", 0):
-            with self.subTest(selector=selector), self.assertRaisesRegex(ValueError, "single CUDA"):
+    def test_gpu_selector_is_required_and_validated(self):
+        for selector in (None, "", "-1", "0,1", "GPU-a123", 0, []):
+            with self.subTest(selector=selector), self.assertRaisesRegex(ValueError, "GPU"):
                 build_launch(LLAMA, {"device": "gpu", "gpu": selector}, MODEL)
         for kwargs in ({"gpu_id": GPU}, {}):
             with self.assertRaisesRegex(ValueError, "CPU profile"):
                 build_launch(LLAMA, {"device": "cpu", "gpu": "0"}, MODEL, **kwargs)
-        with self.assertRaisesRegex(ValueError, "differs"):
+        with self.assertRaisesRegex(ValueError, "differ"):
             build_launch(LLAMA, {"device": "gpu", "gpu": GPU}, MODEL, gpu_id="0")
 
     def test_llama_embedding_pooling(self):
@@ -228,7 +340,7 @@ class EngineTests(unittest.TestCase):
                 self.assertIn(wanted, engine(launch))
                 self.assertNotIn(unwanted, engine(launch))
                 self.assertEqual(launch.env["CUDA_VISIBLE_DEVICES"], GPU)
-                self.assertIn("--device=nvidia.com/gpu=all", launch.argv)
+                self.assertIn(f"--device=nvidia.com/gpu={GPU}", launch.argv)
                 self.assertEqual(engine(launch), (
                     "--listen-ip", "127.0.0.1", "--listen-port", "1234",
                     "--diffusion-model", "/models/flux.gguf", "--vae", "/models/vae.safetensors",

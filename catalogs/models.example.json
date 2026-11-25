@@ -4,6 +4,16 @@
     "container-llama": {
       "adapter": "llama.cpp",
       "image": "ghcr.io/ggml-org/llama.cpp:server@sha256:b0cd5490eefff30b40dcd47f7249a7d7211136908f73fe440a2a86b35a22b23b"
+    },
+    "container-openai": {
+      "adapter": "container",
+      "image": "ghcr.io/example/vllm-openai:latest@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "argv": [
+        "--host", "{host}",
+        "--port", "{port}",
+        "--model", "replace-with-a-hugging-face-model-id"
+      ],
+      "env": { "VLLM_LOGGING_LEVEL": "INFO" }
     }
   },
   "artifacts": {
@@ -37,6 +47,32 @@
           "runtime": "container-llama",
           "device": "cpu",
           "artifacts": { "model": "hf-weights" }
+        }
+      }
+    },
+    "example-openai-server": {
+      "name": "Example generic OpenAI-compatible server (replace image digest)",
+      "io": [{"input": ["text"], "output": "text"}],
+      "default_profile": "cpu",
+      "profiles": {
+        "cpu": {
+          "runtime": "container-openai",
+          "device": "cpu",
+          "artifacts": {},
+          "host": "127.0.0.1",
+          "port": 8090,
+          "resources": { "cpu_count": 4 },
+          "health": { "path": "/health", "timeout_seconds": 180 }
+        },
+        "gpu": {
+          "runtime": "container-openai",
+          "device": "gpu",
+          "gpu": "0",
+          "artifacts": {},
+          "host": "127.0.0.1",
+          "port": 8091,
+          "vram_mib": 8000,
+          "health": { "path": "/health", "timeout_seconds": 240 }
         }
       }
     }

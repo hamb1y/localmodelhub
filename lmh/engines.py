@@ -1,10 +1,12 @@
 """Translate local runtime configuration into container and probe specifications.
 
-Typed adapters (llama.cpp and stable-diffusion.cpp) run in rootless Podman
-containers approved by local policy; model files are bind-mounted read-only at
-their host paths. The controller resolves artifacts, checks the image and runs
-the specification with shell=False. Pass Launch.env as the complete environment
-of the Podman client, not as overrides on the controller environment.
+Every managed engine runs in a rootless Podman container approved by local
+policy: the generic ``container`` adapter plus the typed llama.cpp and
+stable-diffusion.cpp adapters share one launch mechanism. Model files are
+bind-mounted read-only at their host paths. The controller resolves artifacts,
+checks the image and runs the specification with shell=False. Pass Launch.env as
+the complete environment of the Podman client, not as overrides on the
+controller environment.
 """
 
 from __future__ import annotations
@@ -20,7 +22,14 @@ from pathlib import Path
 from .podman import image_reference
 
 LLAMA_ENGINE_PORT = 18080
-CONTAINER_ADAPTERS = frozenset({"llama.cpp", "stable-diffusion.cpp"})
+# Typed adapters plus the generic OpenAI-compatible server adapter. All of them
+# launch through the same digest-pinned Podman path.
+CONTAINER_ADAPTERS = frozenset({"container", "llama.cpp", "stable-diffusion.cpp"})
+CONTAINER_ENGINE_DEFAULTS = {
+    "llama.cpp": (LLAMA_ENGINE_PORT, "/health"),
+    "stable-diffusion.cpp": (1234, "/v1/models"),
+    "container": (None, "/health"),
+}
 
 
 @dataclass(frozen=True)
@@ -31,7 +40,18 @@ class Container:
     name: str
     engine_argv: tuple[str, ...]
     mounts: tuple[tuple[str, str], ...]
-    gpu: str | None = None
+    gpus: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if isinstance(self.gpus, str):
+            object.__setattr__(self, "gpus", (self.gpus,) if self.gpus else ())
+        elif not isinstance(self.gpus, tuple):
+            object.__setattr__(self, "gpus", tuple(self.gpus))
+
+    @property
+    def gpu(self) -> str | None:
+        """The single attached GPU, for callers that predate multi-GPU."""
+        return self.gpus[0] if len(self.gpus) == 1 else None
 
 
 @dataclass(frozen=True)
@@ -54,7 +74,10 @@ _UUID = re.compile(
 _ORDINAL = re.compile(r"0|[1-9][0-9]{0,8}")
 _LABEL = re.compile(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?")
 _SHARD = re.compile(r"(.+)-([0-9]{5})-of-([0-9]{5})\.gguf")
-_RUNTIME_FIELDS = {"adapter", "executable", "image", "version", "sha256", "options", "cwd"}
+_RUNTIME_FIELDS = {"adapter", "executable", "image", "version", "sha256", "options"}
+_NATIVE_FIELDS = _RUNTIME_FIELDS | {"argv", "env", "cwd"}
+_GENERIC_FIELDS = _RUNTIME_FIELDS | {"argv", "env"}
+_MANAGED_ENV = frozenset({"CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "NVIDIA_VISIBLE_DEVICES"})
 _LLAMA_INTS = {
     "threads": "--threads",
     "threads_batch": "--threads-batch",
@@ -196,21 +219,31 @@ def _network(profile: dict, default_port: int | None, default_probe: str | None)
     return host, port, None, timeout
 
 
-def _device(profile: dict, gpu_id: str | None) -> str | None:
+def _device(profile: dict, gpu_ids) -> tuple[str, ...]:
+    """Return the CUDA UUIDs visible to this profile, in selection order.
+
+    A GPU profile may select one GPU or several. The controller resolves the
+    profile's UUID/ordinal selectors against detected hardware and passes the
+    resolved UUIDs; an explicit UUID or a different ordinal cannot be replaced.
+    """
     device = profile.get("device")
     if device == "cpu":
-        if gpu_id is not None or "gpu" in profile:
+        if gpu_ids is not None or "gpu" in profile:
             raise ValueError("a CPU profile cannot select a GPU")
-        return None
+        return ()
     if device != "gpu":
         raise ValueError("device must be 'cpu' or 'gpu'")
-    configured = _gpu_selector(profile["gpu"]) if "gpu" in profile else None
-    selected = _gpu_selector(gpu_id if gpu_id is not None else configured)
+    configured = _gpu_selectors(profile["gpu"]) if "gpu" in profile else ()
+    selected = _gpu_selectors(gpu_ids) if gpu_ids is not None else configured
+    if not selected:
+        raise ValueError("GPU profiles require at least one CUDA GPU UUID or ordinal")
     if configured and selected != configured:
-        # The controller may resolve an index to a UUID, but cannot replace an
-        # explicit UUID or substitute a different ordinal.
-        if not (_ORDINAL.fullmatch(configured) and _UUID.fullmatch(selected)):
-            raise ValueError("resolved GPU differs from the requested GPU")
+        # The controller may resolve ordinals to UUIDs element by element.
+        if len(configured) != len(selected) or not all(
+            _ORDINAL.fullmatch(requested) and _UUID.fullmatch(resolved)
+            for requested, resolved in zip(configured, selected)
+        ):
+            raise ValueError("resolved GPUs differ from the requested GPUs")
     return selected
 
 
@@ -220,7 +253,22 @@ def _gpu_selector(value: object) -> str:
             return "GPU-" + value[4:].lower()
         if _ORDINAL.fullmatch(value):
             return value
-    raise ValueError("GPU profiles require a single CUDA GPU UUID or ordinal")
+    raise ValueError("GPU selectors must be a CUDA GPU UUID or ordinal")
+
+
+def _gpu_selectors(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        raw = [value]
+    elif isinstance(value, (list, tuple)):
+        raw = list(value)
+    else:
+        raise ValueError("GPU selectors must be a CUDA GPU UUID, ordinal, or list of them")
+    if not raw:
+        raise ValueError("GPU selectors must not be empty")
+    selectors = tuple(_gpu_selector(item) for item in raw)
+    if len(set(selectors)) != len(selectors):
+        raise ValueError("GPU selectors must not repeat a device")
+    return selectors
 
 
 def _llama_speculation(args: list[str], options: dict, files: dict, gpu: str | None) -> None:
@@ -381,25 +429,44 @@ def _diffusion(args: list[str], options: dict, files: dict, gpu: str | None) -> 
         args.extend(("--cfg-scale", str(scale)))
 
 
-def _native_args(raw: object, files: dict, host: str, port: int | None, gpu: str | None):
+def _template_args(
+    raw: object, files: dict, host: str, port: int | None, gpus: tuple[str, ...], name: str,
+):
+    """Expand whole-token arguments without a shell.
+
+    ``{artifact:ROLE}`` expands to one argument per resolved path. ``{gpu}``
+    expands to the comma-separated CUDA UUID list, matching
+    CUDA_VISIBLE_DEVICES, and is an error for CPU profiles.
+    """
     if not isinstance(raw, list):
-        raise ValueError("native argv must be an array of argument strings")
+        raise ValueError(f"{name} argv must be an array of argument strings")
     for arg in raw:
-        token = _text(arg, "native argv item", empty=True)
+        token = _text(arg, f"{name} argv item", empty=True)
         if token.startswith("{artifact:") and token.endswith("}"):
             yield from map(str, _paths(files, token[10:-1]))
         elif token == "{host}":
             yield host
         elif token == "{port}":
             if port is None:
-                raise ValueError("native {port} requires a profile port")
+                raise ValueError(f"{name} {{port}} requires a profile port")
             yield str(port)
         elif token == "{gpu}":
-            if gpu is None:
-                raise ValueError("native {gpu} requires a GPU profile")
-            yield gpu
+            if not gpus:
+                raise ValueError(f"{name} {{gpu}} requires a GPU profile")
+            yield ",".join(gpus)
         else:
             yield token
+
+
+def _container_env(raw: object) -> dict[str, str]:
+    env = {}
+    for key, value in _object(raw, "env").items():
+        if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", key):
+            raise ValueError("invalid container environment key")
+        if key in _MANAGED_ENV:
+            raise ValueError(f"{key} is managed by the adapter")
+        env[key] = _text(value, f"env.{key}", empty=True)
+    return env
 
 
 def _container_name(identity: str) -> str:
@@ -435,10 +502,24 @@ def _mounts(files: dict) -> tuple[tuple[str, str], ...]:
 
 
 def _podman_launch(
-    podman: str, runtime: dict, files: dict, gpu: str | None, identity: str, engine: list[str],
+    podman: str,
+    runtime: dict,
+    files: dict,
+    gpus: tuple[str, ...],
+    identity: str,
+    engine: list[str],
+    *,
+    cpu_count: int | None = None,
+    container_env: dict[str, str] | None = None,
 ) -> tuple[list[str], Container]:
+    """Build the single Podman launch shared by every container adapter.
+
+    GPU profiles receive one CDI device per selected GPU UUID, never the
+    ``all`` device, so the engine cannot see a GPU the profile did not select.
+    CPU profiles receive no device at all and an explicitly empty visibility
+    list. Each container gets its own cgroup so a CPU quota can be applied.
+    """
     image = image_reference(runtime.get("image"))
-    command = [str(_absolute(runtime["executable"], "executable"))] if "executable" in runtime else []
     mounts = _mounts(files)
     name = _container_name(identity)
     argv = [
@@ -448,43 +529,65 @@ def _podman_launch(
         # SELinux relabeling off so read-only model binds work on enforcing hosts.
         "--security-opt=no-new-privileges", "--security-opt=label=disable",
     ]
-    if gpu:
+    if cpu_count is not None:
+        argv.append(f"--cpus={cpu_count}")
+    for gpu in gpus:
         # Rootless GPU access uses a CDI device, not the host's device files.
-        argv.append("--device=nvidia.com/gpu=all")
+        # One UUID device per selected GPU keeps siblings out of the container.
+        argv.append(f"--device=nvidia.com/gpu={gpu}")
     argv.extend(f"--mount=type=bind,src={source},dst={target},readonly=true"
                 for source, target in mounts)
-    argv.extend(("--env=CUDA_DEVICE_ORDER=PCI_BUS_ID", f"--env=CUDA_VISIBLE_DEVICES={gpu or ''}"))
-    argv.extend((image, *command, *engine))
-    return argv, Container(image, name, tuple([*command, *engine]), mounts, gpu)
+    visible = ",".join(gpus)
+    argv.extend((
+        "--env=CUDA_DEVICE_ORDER=PCI_BUS_ID",
+        f"--env=CUDA_VISIBLE_DEVICES={visible}",
+        f"--env=NVIDIA_VISIBLE_DEVICES={visible}",
+    ))
+    argv.extend(f"--env={key}={value}" for key, value in (container_env or {}).items())
+    argv.extend((image, *engine))
+    return argv, Container(image, name, tuple(engine), mounts, gpus)
 
 
 def build_launch(
     runtime: dict,
     profile: dict,
     files: dict[str, Path | list[Path]],
-    gpu_id: str | None = None,
+    gpu_id: str | list[str] | tuple[str, ...] | None = None,
     *,
     trusted_native: bool = False,
     identity: str = "probe",
     podman: str = "podman",
+    cpu_count: int | None = None,
 ) -> Launch:
     """Build argv without executing the runtime or inspecting its binary.
 
-    Typed adapters require a digest-pinned ``runtime.image`` approved by the
-    controller; every artifact path is bind-mounted read-only at the same path
-    inside the container. ``runtime.executable``, if set, is an absolute
-    in-container command that overrides the image entrypoint. ``identity``
+    Every container adapter requires a digest-pinned ``runtime.image`` approved
+    by the controller; every artifact path is bind-mounted read-only at the same
+    path inside the container. ``runtime.executable``, if set, is an absolute
+    in-container command placed before the engine arguments. ``identity``
     (model/profile) names the container deterministically.
 
-    A controller-resolved gpu_id takes precedence over profile.gpu. Prefer a
-    physical CUDA UUID; numeric selectors are CUDA PCI-bus-order ordinals.
+    ``container`` is the generic adapter for any OpenAI-compatible server:
+    ``runtime.executable`` plus ``runtime.argv`` form the in-container command,
+    and ``runtime.env`` becomes container environment. Typed adapters translate
+    their options into the same command stream and share this launch path.
+    Portable token substitutions for generic argv: ``{host}``, ``{port}``,
+    ``{gpu}`` (comma-separated selected UUIDs), ``{artifact:ROLE}`` (one arg per
+    path). ``container`` profiles must declare a port and default to a
+    ``/health`` probe.
+
+    A controller-resolved gpu_id (one UUID or a list) takes precedence over
+    profile.gpu, which may also be a list. CPU profiles select no GPU. GPU
+    profiles get one CDI device per selected UUID; typed adapters pin exactly
+    one GPU because their flags address ``CUDA0``. ``cpu_count`` limits a
+    CPU-only container; an explicit ``resources.cpu_count`` wins.
+
     llama.cpp flags target upstream b12359. A fit target is an engine estimate,
     not a resource reservation; the engine does not override fixed layer or
     context sizes. A resolved chat_template enables Jinja, and a draft_model
     selects draft-simple (the only typed mode that accepts a draft_model).
     Native approval must come from the controller, never a catalog field.
-    For native, runtime.argv is the argument tail after executable. Whole-token
-    substitutions: {host}, {port}, {gpu}, {artifact:ROLE} (one arg per path).
+    For native, runtime.argv is the argument tail after executable.
     Native runtimes are trusted to honor CUDA visibility and the profile.
     """
     runtime = _object(runtime, "runtime")
@@ -497,12 +600,11 @@ def build_launch(
         raise ValueError(f"unsupported runtime adapter: {adapter}")
     if adapter == "native" and trusted_native is not True:
         raise ValueError("native runtimes require controller approval of local config")
-    _known(runtime, _RUNTIME_FIELDS | ({"argv", "env"} if adapter == "native" else set()),
-           "runtime fields")
+    allowed = ({"native": _NATIVE_FIELDS, "container": _GENERIC_FIELDS}
+               .get(adapter, _RUNTIME_FIELDS))
+    _known(runtime, allowed, "runtime fields")
     if adapter == "native" and "image" in runtime:
         raise ValueError("native runtimes cannot use container images")
-    if adapter in CONTAINER_ADAPTERS and "cwd" in runtime:
-        raise ValueError("cwd is not supported for container runtimes")
     for key in ("args", "argv", "extra_argv", "extra_args", "env", "environment",
                 "cwd", "executable", "ld_library_path"):
         if key in profile:
@@ -515,39 +617,56 @@ def build_launch(
     runtime_opts = _object(runtime.get("options", {}), "runtime options")
     profile_opts = _object(profile.get("options", {}), "profile options")
     options = {**runtime_opts, **profile_opts}
-    gpu = _device(profile, gpu_id)
-    default_port, default_probe = {
-        "llama.cpp": (LLAMA_ENGINE_PORT, "/health"),
-        "stable-diffusion.cpp": (1234, "/v1/models"),
-        "native": (None, None),
-    }[adapter]
+    gpus = _device(profile, gpu_id)
+    if adapter in {"llama.cpp", "stable-diffusion.cpp"} and len(gpus) > 1:
+        raise ValueError(f"{adapter} profiles support exactly one GPU")
+    gpu = gpus[0] if gpus else None
+    default_port, default_probe = CONTAINER_ENGINE_DEFAULTS.get(adapter, (None, None))
+    if adapter == "container" and "port" not in profile:
+        raise ValueError("container profiles require a port")
     host, port, health_url, timeout = _network(profile, default_port, default_probe)
     env = {k: v for k, v in os.environ.items()
            if k in {"PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "XDG_CACHE_HOME",
                     "XDG_RUNTIME_DIR"}
            or k.startswith("LC_")}
-    env.update(CUDA_VISIBLE_DEVICES=gpu or "", CUDA_DEVICE_ORDER="PCI_BUS_ID")
+    env.update(CUDA_VISIBLE_DEVICES=",".join(gpus), CUDA_DEVICE_ORDER="PCI_BUS_ID")
     # Rootless Podman needs the per-user runtime directory even under env -i.
     env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     engine: list[str] = []
     if adapter == "native":
         _known(options, set(), "native options")
         engine.append(executable)
-        engine.extend(_native_args(runtime.get("argv", []), files, host, port, gpu))
+        engine.extend(_template_args(runtime.get("argv", []), files, host, port, gpus, "native"))
         for key, value in _object(runtime.get("env", {}), "env").items():
             if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", key):
                 raise ValueError("invalid native environment key")
-            if key in {"CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"}:
+            if key in _MANAGED_ENV:
                 raise ValueError(f"{key} is managed by the adapter")
             env[key] = _text(value, f"env.{key}", empty=True)
         return Launch(tuple(engine), env, cwd, health_url, timeout, None)
 
     image_reference(runtime.get("image"))
-    if adapter == "llama.cpp":
+    resources = _object(profile.get("resources", {}), "resources")
+    limit = resources.get("cpu_count")
+    if limit is not None:
+        limit = _integer(limit, "resources.cpu_count", 1, 4096)
+    elif not gpus:
+        limit = cpu_count if isinstance(cpu_count, int) and cpu_count > 0 else None
+    container_env: dict[str, str] = {}
+    if executable:
+        engine.append(executable)
+    if adapter == "container":
+        _known(options, set(), "container options")
+        engine.extend(_template_args(runtime.get("argv", []), files, host, port, gpus, "container"))
+        container_env = _container_env(runtime.get("env", {}))
+    elif adapter == "llama.cpp":
         engine.extend(("--host", host, "--port", str(port)))
         _llama(engine, options, files, gpu)
     else:
         engine.extend(("--listen-ip", host, "--listen-port", str(port)))
         _diffusion(engine, options, files, gpu)
-    argv, container = _podman_launch(podman, runtime, files, gpu, identity, engine)
+    argv, container = _podman_launch(
+        podman, runtime, files, gpus, identity, engine,
+        cpu_count=limit, container_env=container_env,
+    )
     return Launch(tuple(argv), env, None, health_url, timeout, None, container=container)

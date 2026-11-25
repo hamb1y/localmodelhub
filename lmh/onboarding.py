@@ -359,7 +359,7 @@ def onboard(emit) -> int:
                 emit(stage, "ok", "CPU, available memory and disk checked.")
                 if not approved:
                     stage = "runtime"
-                    emit(stage, "working", "Verifying rootless Podman and pulling the approved llama.cpp image.")
+                    emit(stage, "working", "Verifying rootless Podman and pulling the approved starter container image.")
                     install_cpu_runtime(data, policy_path)
                 if not entry["controllable"]:
                     stage = "runtime"

@@ -51,12 +51,14 @@ class SupervisorTests(unittest.TestCase):
 
     def test_memory_limits_apply_to_the_container_unit(self):
         argv = self.start(self.container_launch(), {
-            "resources": {"memory_high_mib": 256, "memory_max_mib": 512, "swap_max_mib": 0},
+            "resources": {"memory_high_mib": 256, "memory_max_mib": 512, "swap_max_mib": 0,
+                          "cpu_count": 3},
             "lifecycle": {"stop_timeout_seconds": 45},
         })
         self.assertIn("--property=MemoryHigh=256M", argv)
         self.assertIn("--property=MemoryMax=512M", argv)
         self.assertIn("--property=MemorySwapMax=0M", argv)
+        self.assertIn("--property=CPUQuota=300%", argv)
         self.assertIn("--property=TimeoutStopSec=45", argv)
 
     def test_missing_podman_is_reported_before_starting_a_unit(self):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import fcntl
 import tempfile
@@ -7,14 +8,28 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lmh.controller import Controller, MIB
+from lmh.catalog import CatalogError, validate_catalog
+from lmh.controller import Controller, MIB, _check_config
 
 IMAGE = "ghcr.io/example/llama.cpp:server@sha256:" + "a" * 64
+GPU_0 = "GPU-00000000-0000-0000-0000-000000000000"
+GPU_1 = "GPU-11111111-1111-1111-1111-111111111111"
 
 
 def _gpu(free=16000):
-    return {"cpu": "test", "ram_total_bytes": 32 * 1024 * MIB, "ram_available_bytes": 16 * 1024 * MIB,
-            "gpus": [{"id": "GPU-test", "name": "test GPU", "total_bytes": 16000 * MIB, "free_bytes": free * MIB}]}
+    return {"cpu": "test", "cpu_logical_count": 8,
+            "ram_total_bytes": 32 * 1024 * MIB, "ram_available_bytes": 16 * 1024 * MIB,
+            "gpus": [{"id": "GPU-test", "index": 0, "name": "test GPU",
+                      "total_bytes": 16000 * MIB, "free_bytes": free * MIB}]}
+
+
+def _gpus(*free):
+    ids = (GPU_0, GPU_1, "GPU-22222222-2222-2222-2222-222222222222")
+    return {"cpu": "test", "cpu_logical_count": 16,
+            "ram_total_bytes": 64 * 1024 * MIB, "ram_available_bytes": 32 * 1024 * MIB,
+            "gpus": [{"id": ids[index], "index": index, "name": f"GPU {index}",
+                      "total_bytes": 16000 * MIB, "free_bytes": value * MIB}
+                     for index, value in enumerate(free)]}
 
 
 class FakeSupervisor:
@@ -218,6 +233,110 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual(launch.container.mounts, (("/models/model.gguf", "/models/model.gguf"),))
         self.assertIn("--network=host", launch.argv)
         self.assertEqual(c.status()["models"][0]["profiles"][0]["state"], "stopped")
+
+    def test_container_catalog_requires_port_and_defaults_to_health(self):
+        raw = container_catalog()
+        raw["runtimes"]["llama"] = {
+            "adapter": "container", "image": IMAGE, "argv": ["--port", "{port}"]}
+        del raw["models"]["chat"]["profiles"]["cpu"]["port"]
+        with self.assertRaisesRegex(CatalogError, "port"):
+            _check_config(validate_catalog(raw))
+        raw["models"]["chat"]["profiles"]["cpu"]["port"] = 38123
+        checked = _check_config(validate_catalog(raw))
+        self.assertEqual(checked["models"]["chat"]["profiles"]["cpu"]["health"], {"path": "/health"})
+        raw["models"]["chat"]["profiles"]["cpu"]["gpu"] = ["0"]
+        with self.assertRaisesRegex(CatalogError, "GPU profile"):
+            _check_config(validate_catalog(raw))
+
+    def test_container_adapter_is_portable_and_validates_gpu_lists(self):
+        raw = {
+            "schema_version": 1,
+            "runtimes": {"vllm": {"adapter": "container", "image": IMAGE,
+                                  "argv": ["--port", "{port}"], "env": {"A": "1"}}},
+            "artifacts": {}, "models": {}, "boot": [],
+        }
+        self.assertEqual(_check_config(validate_catalog(raw), portable=True)["runtimes"]["vllm"],
+                         raw["runtimes"]["vllm"])
+        typed = copy.deepcopy(raw)
+        typed["runtimes"]["vllm"] = {"adapter": "llama.cpp", "image": IMAGE, "argv": []}
+        with self.assertRaisesRegex(CatalogError, "portable"):
+            _check_config(validate_catalog(typed), portable=True)
+        raw["models"] = {
+            "chat": {
+                "name": "Chat", "io": [{"input": ["text"], "output": "text"}],
+                "profiles": {
+                    "gpu": {"runtime": "vllm", "device": "gpu", "gpu": [GPU_0, GPU_1],
+                            "artifacts": {}, "port": 38123},
+                },
+            },
+        }
+        checked = _check_config(validate_catalog(raw))
+        self.assertEqual(checked["models"]["chat"]["profiles"]["gpu"]["gpu"], [GPU_0, GPU_1])
+        for selector in ([], [GPU_0, GPU_0], "not-a-uuid"):
+            invalid = copy.deepcopy(raw)
+            invalid["models"]["chat"]["profiles"]["gpu"]["gpu"] = selector
+            with self.subTest(selector=selector), self.assertRaisesRegex(CatalogError, "GPU"):
+                _check_config(validate_catalog(invalid))
+
+    def test_generic_container_passes_only_selected_gpus_and_cpu_limits(self):
+        raw = container_catalog()
+        raw["runtimes"]["llama"] = {
+            "adapter": "container", "image": IMAGE,
+            "argv": ["--host", "{host}", "--port", "{port}"],
+        }
+        raw["models"]["chat"]["profiles"] = {
+            "cpu": {"runtime": "llama", "device": "cpu", "artifacts": {"model": "weights"},
+                    "port": 38123},
+            "duo": {"runtime": "llama", "device": "gpu", "gpu": [GPU_0, GPU_1],
+                    "artifacts": {"model": "weights"}, "port": 38124, "vram_mib": 4000},
+        }
+        self.cfg.write_text(json.dumps(raw))
+        self.container = FakeContainer()
+        policy = {"runtimes": {"llama": {"adapter": "container", "image": IMAGE}}}
+        hardware = lambda: _gpus(16000, 9000)
+        controller = Controller(
+            self.cfg, self.root / "state", policy, driver=self.driver,
+            hardware=hardware, artifact_store=FakeStore(), container=self.container,
+            boot_reader=lambda: "boot1", ready=lambda url: True,
+        )
+        self.addCleanup(controller.shutdown)
+        controller.reconcile()
+        with patch.object(Controller, "_check_port"):
+            _, _, cpu_launch = controller._prepare(("chat", "cpu"))
+            _, _, gpu_launch = controller._prepare(("chat", "duo"))
+        self.assertEqual([arg for arg in cpu_launch.argv if arg.startswith("--device=")], [])
+        self.assertIn("--cpus=16", cpu_launch.argv)
+        self.assertIn("--env=CUDA_VISIBLE_DEVICES=", cpu_launch.argv)
+        self.assertEqual(gpu_launch.container.gpus, (GPU_0, GPU_1))
+        self.assertEqual([arg for arg in gpu_launch.argv if arg.startswith("--device=")], [
+            f"--device=nvidia.com/gpu={GPU_0}", f"--device=nvidia.com/gpu={GPU_1}",
+        ])
+        self.assertIn(f"--env=CUDA_VISIBLE_DEVICES={GPU_0},{GPU_1}", gpu_launch.argv)
+        self.assertFalse(any(arg.startswith("--cpus=") for arg in gpu_launch.argv))
+        self.assertEqual(gpu_launch.container.engine_argv[-2:], ("--port", "38124"))
+
+    def test_gpu_selection_resolves_ordinals_and_rejects_ambiguous_sets(self):
+        raw = container_catalog()
+        controller = Controller(
+            self.cfg, self.root / "state", {}, driver=self.driver, hardware=lambda: _gpus(1, 2),
+            artifact_store=FakeStore(), container=FakeContainer(),
+            boot_reader=lambda: "boot1", ready=lambda url: True,
+        )
+        self.addCleanup(controller.shutdown)
+        self.cfg.write_text(json.dumps(raw))
+        hardware = _gpus(1, 2)
+        self.assertEqual([gpu["id"] for gpu in controller._gpus(
+            {"device": "gpu", "gpu": ["1", "0"]}, hardware)], [GPU_1, GPU_0])
+        self.assertEqual([gpu["id"] for gpu in controller._gpus(
+            {"device": "gpu", "gpu": [GPU_1]}, hardware)], [GPU_1])
+        for profile, message in (
+            ({"device": "gpu"}, "Several GPUs"),
+            ({"device": "gpu", "gpu": ["9"]}, "No GPU matches"),
+            ({"device": "gpu", "gpu": [GPU_0, GPU_0]}, "more than once"),
+        ):
+            with self.subTest(profile=profile), self.assertRaisesRegex(RuntimeError, message):
+                controller._gpus(profile, hardware)
+        self.assertEqual(controller._gpus({"device": "cpu"}, hardware), [])
 
     def test_container_runtime_requires_an_approved_pinned_image(self):
         for image, approved, message in (

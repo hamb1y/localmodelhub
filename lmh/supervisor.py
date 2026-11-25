@@ -103,6 +103,10 @@ class Supervisor:
                             ("swap_max_mib", "MemorySwapMax")):
             if field in resources:
                 argv.append(f"--property={prop}={int(resources[field])}M")
+        # Bound CPU-only containers to their declared share of host CPUs. The
+        # matching Podman --cpus limit is applied to the container cgroup.
+        if "cpu_count" in resources:
+            argv.append(f"--property=CPUQuota={int(resources['cpu_count']) * 100}%")
         argv.append(f"--property=TimeoutStopSec={int(policy.get('stop_timeout_seconds', 30))}")
         environment = []
         for key, value in sorted(launch.env.items()):

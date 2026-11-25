@@ -20,8 +20,9 @@ the file is the only source of those declarations.
    boot**; restarting the daemon is not a catalog reload. After boot, use
    `lmh list` and explicitly start the profile if it has no boot entry.
 
-For a shareable catalog, use typed adapters, loopback bindings, and pinned
-Hugging Face files with a positive `size` and at least one verified hash.
+For a shareable catalog, use the generic `container` adapter or a typed
+adapter, loopback bindings, and pinned Hugging Face files with a positive
+`size` and at least one verified hash.
 `lmh stage --catalog FILE` checks those requirements and schedules the
 reviewed catalog to **replace**, not merge with, the local file at the next
 boot. Staging clears its `boot` entries. For a host-only file with local
@@ -112,24 +113,92 @@ Runtime, CPU/GPU, and quantization are deployment choices, not model types.
 
 ## Runtimes, artifacts, and profiles
 
-**Runtimes.** A runtime requires an `adapter`, normally `llama.cpp` or
-`stable-diffusion.cpp`. Those typed adapters always run in a rootless Podman
-container, so the runtime (or its local policy approval) needs a digest-pinned
-`image`, for example `ghcr.io/ggml-org/llama.cpp:server@sha256:<64 hex>`.
-Mutable tags alone are rejected. `executable` is optional and names an absolute command *inside* the
-container (for images whose entrypoint is not the engine server, such as
-`/sd-server`); it is never a host binary. A definition can also set adapter
-`options` and pin `version` or `sha256` for policy matching. The local
-[runtime policy](configuration.md#runtime-policy) approves the image separately.
-`native` and `systemd` are for explicitly reviewed host-only integrations, not
-portable catalogs.
+**Runtimes.** Every managed runtime runs in a rootless Podman container. The
+generic `container` adapter runs any OpenAI-compatible HTTP server, including
+vLLM, TGI, and a llama.cpp server. The typed `llama.cpp` and
+`stable-diffusion.cpp` adapters translate their `options` into engine flags and
+use the same container launch path.
+
+All managed runtimes need a digest-pinned `image` (or one supplied by local
+policy), for example `ghcr.io/ggml-org/llama.cpp:server@sha256:<64 hex>`.
+Mutable tags alone are rejected. `executable` is optional and names an
+absolute command *inside* the container; it is never a host binary. A typed
+runtime can set adapter `options` and pin `version` or `sha256` for policy
+matching. The local [runtime policy](configuration.md#runtime-policy) approves
+the image separately. `native` and `systemd` remain explicitly approved
+host-only escape hatches and cannot be used in portable catalogs; prefer
+`container` for any engine that can run from a pinned image.
+
+A generic runtime adds an `argv` array and an optional `env` object. `argv` is
+the in-container argument tail, and whole tokens are substituted without a
+shell:
+
+| Token | Expands to |
+| --- | --- |
+| `{host}` | The profile's engine bind host. |
+| `{port}` | The profile's engine port. |
+| `{gpu}` | Comma-separated CUDA UUIDs selected for the profile, as in `CUDA_VISIBLE_DEVICES`. A CPU profile rejects it. |
+| `{artifact:ROLE}` | One argument per resolved path in that profile artifact role. |
+
+`env` values are literal and become container environment variables. Do not
+put tokens or secrets in a shared catalog; keep runtime credentials in the
+approved image or a locally reviewed catalog instead. This runtime exposes a
+vLLM server on the profile port and defaults to a `/health` readiness probe:
+
+```json
+{
+  "vllm": {
+    "adapter": "container",
+    "image": "vllm/vllm-openai:latest@sha256:<64 hex>",
+    "argv": ["--host", "{host}", "--port", "{port}", "--model", "org/model"],
+    "env": { "VLLM_LOGGING_LEVEL": "INFO" }
+  }
+}
+```
+
+A `container` profile must declare an explicit `port`. Its `health.path`
+defaults to `/health`; override it if the server answers readiness elsewhere.
+Typed adapters keep their existing defaults.
 
 Model files are bind-mounted read-only into the container at their host
 absolute paths, so engine arguments and artifact roles stay the same. A
 container uses the host network namespace and must bind a loopback `host`; the
 controller and readiness probe reach it at `127.0.0.1:<port>` exactly as
-before. GPU profiles receive one NVIDIA CDI device and the selected
-`CUDA_VISIBLE_DEVICES` value.
+before.
+
+### CPU and GPU passthrough
+
+Device passthrough follows the profile, not the image:
+
+- **CPU profiles** get no GPU device at all. Both
+  `CUDA_VISIBLE_DEVICES` and `NVIDIA_VISIBLE_DEVICES` are explicitly empty, so
+  an engine cannot fall back to a host GPU. CPU-only containers are limited to
+  the host's logical CPU count by default; set `resources.cpu_count` to reserve
+  fewer.
+- **GPU profiles** select one GPU, or several, in `gpu`. Every selected UUID
+  becomes its own `nvidia.com/gpu=<uuid>` CDI device, and the engine's
+  `CUDA_VISIBLE_DEVICES` contains exactly that UUID list. The container never
+  receives `nvidia.com/gpu=all`, so it cannot see an unselected sibling.
+  `vram_mib` is the budget applied to each selected GPU.
+- With no `gpu` selector, a GPU profile uses the host's only GPU. On a
+  multi-GPU host the profile must name its GPUs, so a model never silently
+  receives the wrong card.
+
+A two-GPU profile for a tensor-parallel server:
+
+```json
+{
+  "gpu": ["GPU-11111111-1111-1111-1111-111111111111",
+          "GPU-22222222-2222-2222-2222-222222222222"],
+  "vram_mib": 16000
+}
+```
+
+The engine must also be told to use both devices when it needs an explicit
+parallelism argument; add it to the generic runtime's `argv` (for example
+`"--tensor-parallel-size", "2"`). Typed `llama.cpp` and
+`stable-diffusion.cpp` profiles address a single `CUDA0` and reject multiple
+selectors.
 
 **Artifacts.** Each artifact requires a `source`. A Hugging Face source is
 `{"kind":"hf","repo":"org/name","revision":"<40-hex-commit>","file":"path/to/file.gguf"}`.
@@ -149,12 +218,12 @@ for its embedding mode. See the starter for a diffusion profile.
 | Optional profile keys | Purpose |
 | --- | --- |
 | `host`, `port` | Internal engine bind address and port. Use `127.0.0.1` or `::1`. Clients only need the shared inference port, `5101`. |
-| `gpu` | CUDA UUID or ordinal as a string, GPU profiles only. |
-| `ram_mib`, `vram_mib` | Resource estimates for safe coexistence; `vram_mib` is GPU-only. |
+| `gpu` | CUDA UUID or ordinal, or a list of them, for GPU profiles only. Multiple values attach exactly those CDI devices. |
+| `ram_mib`, `vram_mib` | Resource estimates for safe coexistence; `vram_mib` is GPU-only and applies to each selected GPU. |
 | `options` | Typed profile-specific runtime settings. |
 | `health` | Local `path` and `timeout_seconds` for readiness. |
 | `metrics_path` | Local engine metrics endpoint, if available. |
-| `resources` | Optional cgroup limits for the transient unit and its container: `memory_high_mib`, `memory_max_mib`, `swap_max_mib`. |
+| `resources` | Optional cgroup limits for the transient unit and its container: `memory_high_mib`, `memory_max_mib`, `swap_max_mib`, `cpu_count`. |
 | `lifecycle` | Optional `stop_timeout_seconds`. |
 
 ## Unified inference

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .artifacts import ArtifactStore, ArtifactUnavailable
 from .catalog import CatalogError, load_catalog, validate_catalog
-from .engines import CONTAINER_ADAPTERS, LLAMA_ENGINE_PORT, build_launch
+from .engines import CONTAINER_ADAPTERS, CONTAINER_ENGINE_DEFAULTS, build_launch
 from .hardware import snapshot
 from .podman import Podman, image_digest, image_reference
 from .state import State
@@ -47,10 +47,11 @@ def _check_config(config: dict, *, portable: bool = False) -> dict:
         adapter = runtime["adapter"]
         if adapter not in CONTAINER_ADAPTERS | {"native", "systemd"}:
             raise CatalogError(f"{name}: unsupported adapter {adapter}")
-        if portable and (adapter not in CONTAINER_ADAPTERS
-                         or set(runtime) - {"adapter", "version", "sha256", "options", "image",
-                                            "executable"}):
-            raise CatalogError(f"{name}: imported runtimes must use portable typed adapters")
+        portable_fields = {"adapter", "version", "sha256", "options", "image", "executable"}
+        if adapter == "container":
+            portable_fields |= {"argv", "env"}
+        if portable and (adapter not in CONTAINER_ADAPTERS or set(runtime) - portable_fields):
+            raise CatalogError(f"{name}: imported runtimes must use portable container adapters")
         if portable and "image" in runtime:
             try:
                 image_reference(runtime["image"])
@@ -71,9 +72,13 @@ def _check_config(config: dict, *, portable: bool = False) -> dict:
         for name, profile in spec["profiles"].items():
             try:
                 runtime = config["runtimes"][profile["runtime"]]
-                if runtime["adapter"] in {"llama.cpp", "stable-diffusion.cpp"}:
-                    profile.setdefault("port", LLAMA_ENGINE_PORT if runtime["adapter"] == "llama.cpp" else 1234)
-                    probe = "/health" if runtime["adapter"] == "llama.cpp" else "/v1/models"
+                adapter = runtime["adapter"]
+                if adapter in CONTAINER_ADAPTERS:
+                    default_port, probe = CONTAINER_ENGINE_DEFAULTS[adapter]
+                    if default_port is None and "port" not in profile:
+                        raise ValueError("container profiles require an explicit port")
+                    if default_port is not None:
+                        profile.setdefault("port", default_port)
                     if isinstance(profile.setdefault("health", {}), dict):
                         profile["health"].setdefault("path", probe)
                 if set(profile) - {"runtime", "artifacts", "device", "gpu", "vram_mib", "ram_mib", "host", "port",
@@ -85,8 +90,14 @@ def _check_config(config: dict, *, portable: bool = False) -> dict:
                         raise ValueError(f"{key} must be an integer in [{minimum}, {maximum}]")
                 if profile["device"] == "cpu" and "vram_mib" in profile:
                     raise ValueError("vram_mib applies only to GPU profiles")
-                if "gpu" in profile and (profile["device"] != "gpu" or not isinstance(profile["gpu"], str)):
-                    raise ValueError("gpu selector must be a string on a GPU profile")
+                if "gpu" in profile:
+                    if profile["device"] != "gpu":
+                        raise ValueError("gpu selector must be on a GPU profile")
+                    selectors = (profile["gpu"] if isinstance(profile["gpu"], list)
+                                 else [profile["gpu"]])
+                    if (not selectors or any(not isinstance(item, str) for item in selectors)
+                            or len(set(selectors)) != len(selectors)):
+                        raise ValueError("gpu must be a GPU selector or a nonempty list of distinct selectors")
                 host = profile.get("host", "127.0.0.1")
                 if host == "localhost":
                     address = ipaddress.ip_address("127.0.0.1")
@@ -98,7 +109,8 @@ def _check_config(config: dict, *, portable: bool = False) -> dict:
                     raise ValueError("imported profiles must bind to loopback")
                 for key, bounds in (("resources", {"memory_high_mib": (1, 2097152),
                                                      "memory_max_mib": (1, 2097152),
-                                                     "swap_max_mib": (0, 2097152)}),
+                                                     "swap_max_mib": (0, 2097152),
+                                                     "cpu_count": (1, 4096)}),
                                     ("lifecycle", {"stop_timeout_seconds": (1, 600)}),
                                     ("health", {"timeout_seconds": (1, 3600), "path": None})):
                     settings = profile.get(key, {})
@@ -320,55 +332,85 @@ class Controller:
         runtime["executable"] = str(exe)
         return runtime
 
-    def _gpu(self, profile, hw) -> dict | None:
+    def _gpus(self, profile, hw) -> list[dict]:
+        """Resolve a GPU profile's selectors to detected devices, in order.
+
+        UUID selectors are preferred. A decimal selector matches the host
+        nvidia-smi index; the legacy "0" also works on a single-GPU host. With
+        no selector, only an unambiguous single-GPU host is accepted so a
+        multi-GPU machine never silently receives the wrong card.
+        """
         if profile["device"] != "gpu":
-            return None
+            return []
         gpus = hw.get("gpus", [])
         requested = profile.get("gpu")
-        if requested is not None:
-            candidates = [g for g in gpus if requested.casefold() == str(g.get("id")).casefold()
-                          or (len(gpus) == 1 and str(requested) == "0")]
-        else:
-            candidates = list(gpus)
-        if len(candidates) != 1:
-            raise RuntimeError("No matching GPU detected" if not candidates
-                               else "Several GPUs match; choose an explicit GPU in the profile")
-        return candidates[0]
+        if requested is None:
+            if not gpus:
+                raise RuntimeError("No matching GPU detected")
+            if len(gpus) != 1:
+                raise RuntimeError("Several GPUs are available; list the GPU UUIDs to use in the profile")
+            return list(gpus)
+        selectors = [requested] if isinstance(requested, str) else list(requested)
+        selected = []
+        used = set()
+        for selector in selectors:
+            candidates = [
+                gpu for gpu in gpus
+                if selector.casefold() == str(gpu.get("id")).casefold()
+                or selector == str(gpu.get("index"))
+                or (len(gpus) == 1 and selector == "0")
+            ]
+            if not candidates:
+                raise RuntimeError(f"No GPU matches profile selector {selector}")
+            if len(candidates) > 1:
+                raise RuntimeError(f"GPU selector {selector} matches several GPUs; use a UUID")
+            gpu = candidates[0]
+            if gpu.get("id") in used:
+                raise RuntimeError("Profile selects the same GPU more than once")
+            used.add(gpu.get("id"))
+            selected.append(gpu)
+        return selected
 
-    def _coexistence(self, key, profile, gpu, hw, ignore=None) -> None:
+    def _coexistence(self, key, profile, gpus, hw, ignore=None) -> None:
         if (ram := profile.get("ram_mib")) and hw.get("ram_available_bytes") is not None and ignore is None:
             if ram * MIB > hw["ram_available_bytes"]:
                 raise RuntimeError(f"Not enough available host RAM: need {ram} MiB, "
                                    f"have {hw['ram_available_bytes'] // MIB} MiB")
-        if not gpu:
+        if not gpus:
             return
-        active = []
-        for other in self._all():
-            if other == key or other == ignore:
-                continue
-            spec, _ = self._profile(other)
-            if spec["device"] != "gpu" or self._observe(other)["state"] not in ACTIVE:
-                continue
-            try:
-                other_gpu = self._gpu(spec, hw)
-            except RuntimeError:
-                other_gpu = None
-            if not other_gpu or other_gpu["id"] == gpu["id"]:
-                active.append((other, spec.get("vram_mib")))
-        free, total = gpu.get("free_bytes"), gpu.get("total_bytes")
         need = profile.get("vram_mib")
         reserve = self.policy.get("gpu_headroom_mib", 512) * MIB
-        if active and (not need or any(not budget for _, budget in active) or not total or free is None):
-            occupants = ", ".join(f"{m}/{p}" for (m, p), _ in active)
-            raise RuntimeError(f"Cannot verify GPU coexistence with {occupants}; no model was stopped")
-        if need and total and (need + sum(budget or 0 for _, budget in active)) * MIB + reserve > total:
-            raise RuntimeError(f"Declared VRAM budgets do not fit on {gpu.get('name', gpu['id'])}")
-        if need and free is not None and need * MIB + reserve > free:
-            raise RuntimeError(f"Not enough free VRAM: need {need} MiB plus headroom, have {free // MIB} MiB")
-        if not need and not active and total and free is not None:
-            # Unknown estimates are only safe to try on a substantially unoccupied device.
-            if free < total * 0.85 and ignore is None:
-                raise RuntimeError("GPU already holds allocations and the profile has no VRAM budget")
+        for gpu in gpus:
+            name = gpu.get("name", gpu.get("id"))
+            active = []
+            for other in self._all():
+                if other == key or other == ignore:
+                    continue
+                spec, _ = self._profile(other)
+                if spec["device"] != "gpu" or self._observe(other)["state"] not in ACTIVE:
+                    continue
+                try:
+                    other_gpus = self._gpus(spec, hw)
+                except RuntimeError:
+                    # An unresolvable active profile may use any device.
+                    other_gpus = []
+                if not other_gpus or any(item.get("id") == gpu.get("id") for item in other_gpus):
+                    active.append((other, spec.get("vram_mib")))
+            free, total = gpu.get("free_bytes"), gpu.get("total_bytes")
+            if active and (not need or any(not budget for _, budget in active) or not total or free is None):
+                occupants = ", ".join(f"{m}/{p}" for (m, p), _ in active)
+                raise RuntimeError(f"Cannot verify GPU coexistence with {occupants} on {name}; "
+                                   "no model was stopped")
+            if need and total and (need + sum(budget or 0 for _, budget in active)) * MIB + reserve > total:
+                raise RuntimeError(f"Declared VRAM budgets do not fit on {name}")
+            if need and free is not None and need * MIB + reserve > free:
+                raise RuntimeError(f"Not enough free VRAM on {name}: need {need} MiB plus headroom, "
+                                   f"have {free // MIB} MiB")
+            if not need and not active and total and free is not None:
+                # Unknown estimates are only safe to try on a substantially unoccupied device.
+                if free < total * 0.85 and ignore is None:
+                    raise RuntimeError(f"GPU {name} already holds allocations and the profile "
+                                       "has no VRAM budget")
 
     def _files(self, profile, progress) -> dict:
         resolved = {}
@@ -398,15 +440,16 @@ class Controller:
         if observed["state"] == "unknown":
             raise RuntimeError(f"Unable to inspect model state: {observed.get('message') or 'unknown'}")
         hw = self.hardware()
-        gpu = self._gpu(profile, hw)
+        gpus = self._gpus(profile, hw)
         if capacity:
-            self._coexistence(key, profile, gpu, hw)
+            self._coexistence(key, profile, gpus, hw)
             self._check_port(profile)
         files = self._files(profile, progress)
         launch = None if runtime["adapter"] == "systemd" else build_launch(
-            runtime, profile, files, gpu_id=str(gpu["id"]) if gpu else None,
+            runtime, profile, files, gpu_id=[gpu["id"] for gpu in gpus] or None,
             trusted_native=runtime["adapter"] == "native",
-            identity=f"{key[0]}\0{key[1]}", podman=self.container.executable)
+            identity=f"{key[0]}\0{key[1]}", podman=self.container.executable,
+            cpu_count=hw.get("cpu_logical_count"))
         if launch is not None and launch.container is not None:
             self.container.ensure(launch.container.image, progress=progress)
         return profile, runtime, launch
@@ -451,7 +494,7 @@ class Controller:
         profile, runtime, launch = prepared or self._prepare(key, progress=progress)
         # State and capacity can change while artifacts are downloaded.
         hw = self.hardware()
-        self._coexistence(key, profile, self._gpu(profile, hw), hw)
+        self._coexistence(key, profile, self._gpus(profile, hw), hw)
         self._check_port(profile)
         progress("Starting Podman container" if getattr(launch, "container", None) else "Starting native service")
         self.driver.start(*key, runtime, launch, profile)
@@ -484,9 +527,9 @@ class Controller:
                 raise RuntimeError("The explicitly selected source is no longer running")
             prepared = self._prepare(key, capacity=False, progress=progress)
             hw = self.hardware()
-            gpu = self._gpu(profile, hw)
             # Check whether the target could fit after releasing this exact source.
-            hypothetical = dict(gpu, free_bytes=gpu.get("total_bytes")) if gpu else None
+            hypothetical = [dict(gpu, free_bytes=gpu.get("total_bytes"))
+                            for gpu in self._gpus(profile, hw)]
             self._coexistence(key, profile, hypothetical, hw, ignore=previous)
             old_spec, _ = self._profile(previous)
             if old_spec.get("port") != profile.get("port"):

@@ -1,8 +1,9 @@
 """Provision rootless Podman and approve the pinned starter container image.
 
-Model engines no longer run as host binaries. Onboarding verifies that Podman
-works for the service account, pulls the digest-pinned starter image, and
-records that image as the local runtime approval. No image is built here.
+Every managed engine — the typed adapters and the generic ``container``
+adapter — runs in a digest-pinned Podman image. Onboarding verifies that Podman
+works for the service account, pulls the pinned starter image, and records that
+image as the local runtime approval. No image is built here.
 """
 
 from __future__ import annotations

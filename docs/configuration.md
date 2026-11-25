@@ -104,6 +104,10 @@ the catalog. Create `~/.config/localmodelhub/policy.json` as `ai` with mode
       "adapter": "stable-diffusion.cpp",
       "image": "ghcr.io/leejet/stable-diffusion.cpp:master-cuda@sha256:4fd8b723a56c06c421cd299febb393ff9563d448eaa5f713cd98c2017f417542",
       "executable": "/sd-server"
+    },
+    "vllm": {
+      "adapter": "container",
+      "image": "vllm/vllm-openai:latest@sha256:REPLACE_WITH_64_HEX"
     }
   }
 }
@@ -114,11 +118,13 @@ The digest in the catalog, when present, must match this approval. On an
 explicit Start the controller pulls the pinned image if it is missing, then
 runs it with `--pull=never`, so a later tag move cannot change the engine.
 `executable` is an optional absolute command inside the container; omit it to
-use the image entrypoint. Restart the service to load manually edited policy.
-The normal bootstrap handles Podman setup and CPU image approval itself.
-An older policy entry that approves only a host `executable` no longer
-authorizes a typed adapter; replace it with the pinned image. The explicit
-`native` and `systemd` adapters keep their existing host-only approval rules.
+use the image entrypoint. The generic `container` adapter approves the same
+way as the typed adapters; its catalog `argv` and `env` remain reviewable data
+in `models.json`. Restart the service to load manually edited policy. The
+normal bootstrap handles Podman setup and CPU image approval itself. An older
+policy entry that approves only a host `executable` no longer authorizes a
+container adapter; replace it with the pinned image. The explicit `native` and
+`systemd` adapters keep their existing host-only approval rules.
 
 Rootless Podman must work for `ai`: the account needs `/etc/subuid` and
 `/etc/subgid` ranges plus `newuidmap`/`newgidmap` (`uidmap` on Debian and
@@ -129,10 +135,18 @@ starting a model.
 GPU profiles use rootless NVIDIA CDI: install the NVIDIA driver and
 `nvidia-container-toolkit`, generate a CDI spec (`nvidia-ctk cdi generate
 --output=/etc/cdi/nvidia.yaml`), and verify `podman run --device
-nvidia.com/gpu=all … nvidia-smi` works as `ai`. The starter's `sd-cuda`
-profile pulls the pinned stable-diffusion.cpp CUDA image; make sure enough
-VRAM and model storage are available. Without a working CDI spec, start CPU
-profiles only.
+nvidia.com/gpu=<GPU-UUID> … nvidia-smi` works as `ai`. A GPU profile receives
+one CDI device for each `gpu` selector it lists, and the engine sees exactly
+those UUIDs through `CUDA_VISIBLE_DEVICES`. The container never receives
+`nvidia.com/gpu=all`. With no selector, only a single-GPU host is accepted; on
+a multi-GPU host, list the UUIDs explicitly (one or several).
+
+CPU profiles receive no CDI device and an empty device-visibility list. They
+default to the host's logical CPU count; set `resources.cpu_count` to reserve
+fewer CPUs, and it is enforced on both the transient unit and the container.
+The starter's `sd-cuda` profile pulls the pinned stable-diffusion.cpp CUDA
+image; make sure enough VRAM and model storage are available. Without a
+working CDI spec, start CPU profiles only.
 
 Locally configured native commands and adopted systemd units are not portable
 imports. Adopted system units are read-only by default; an `"allowlisted"`
@@ -246,11 +260,12 @@ or TUI, or through an authorized webhook.
 
 The `ram_mib` and `vram_mib` settings are estimates. GPU coexistence requires
 measured free VRAM and known budgets for other managed GPU profiles on the
-same card. Use a CUDA UUID to select a specific GPU. The optional transient
-unit limits `resources.memory_high_mib`, `resources.memory_max_mib`, and
-`resources.swap_max_mib` are separate from those estimates. Rates are based
-on runtime-reported counters or measurements and remain unavailable if
-there is no usable measurement.
+same card; for a multi-GPU profile, `vram_mib` applies to each selected GPU.
+Use a CUDA UUID to select a specific GPU. The optional transient unit limits
+`resources.memory_high_mib`, `resources.memory_max_mib`,
+`resources.swap_max_mib`, and `resources.cpu_count` are separate from those
+estimates. Rates are based on runtime-reported counters or measurements and
+remain unavailable if there is no usable measurement.
 
 Each running profile is a container named `lmh-<model>-<hash>` inside a
 transient user unit. `podman ps --filter name=lmh-` lists them, and

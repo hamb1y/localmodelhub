@@ -3,8 +3,12 @@
 **Containerized local AI inference.** Define your models and runtimes in one
 `models.json`, manage them from the web panel or `lmh` terminal UI, and call
 them through one OpenAI-compatible API. Every managed model runs in its own
-rootless Podman container on Linux, with model files mounted read-only.
-Podman is the only container runtime; the project does not use Docker.
+rootless Podman container on Linux, with model files mounted read-only. Use
+the typed llama.cpp and stable-diffusion.cpp adapters, or the generic
+`container` adapter for vLLM, TGI, and any other OpenAI-compatible server.
+CPU profiles get a CPU-only container; GPU profiles receive only the NVIDIA
+devices selected in the profile. Podman is the only container runtime; the
+project does not use Docker.
 
 ## Install
 
