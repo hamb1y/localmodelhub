@@ -1,4 +1,4 @@
-"""Native LocalModelHub daemon."""
+"""LocalModelHub daemon."""
 
 from __future__ import annotations
 

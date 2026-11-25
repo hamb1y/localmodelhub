@@ -36,8 +36,9 @@ test -s "$prefix/web/build/index.html"
 
 The temporary-home smoke test doesn't exercise the one-step bootstrap. On a
 disposable supported Linux host, test that the bootstrap installs the
-dependencies and CPU runtime, downloads and verifies the public starter,
-and succeeds at a real chat request on port 5101. Check that an interactive
+dependencies, verifies rootless Podman, pulls the digest-pinned CPU image,
+downloads and verifies the public starter, and succeeds at a real chat
+request on port 5101. Check that an interactive
 run opens the Ratatui UI and that a noninteractive run completes the same
 setup in the logs. For an existing install, check that the custom catalog
 is unchanged and running profiles are not stopped.

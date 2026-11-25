@@ -1,14 +1,16 @@
 # LocalModelHub
 
-**Docker for local AI inference.** Define your models and runtimes in one
+**Containerized local AI inference.** Define your models and runtimes in one
 `models.json`, manage them from the web panel or `lmh` terminal UI, and call
-them through one OpenAI-compatible API. LocalModelHub runs natively on Linux;
-no Docker or containers required.
+them through one OpenAI-compatible API. Every managed model runs in its own
+rootless Podman container on Linux, with model files mounted read-only.
+Podman is the only container runtime; the project does not use Docker.
 
 ## Install
 
 On Linux (x86_64 or aarch64, systemd 254+), run this from Bash as a non-root
-user with `sudo`. You’ll need `curl` and an internet connection.
+user with `sudo`. You’ll need `curl` and an internet connection. The bootstrap
+installs Podman and rootless subordinate UID/GID ranges when they are missing.
 
 ```bash
 curl -fsS https://raw.githubusercontent.com/hamb1y/localmodelhub/main/install.sh -o localmodelhub-install.sh && bash localmodelhub-install.sh
@@ -16,8 +18,9 @@ curl -fsS https://raw.githubusercontent.com/hamb1y/localmodelhub/main/install.sh
 
 Setup opens in your terminal, detects inference devices, and lets you keep,
 import, or replace `models.json`. On a fresh install, the default builds the
-app from Git as `ai`, installs llama.cpp, and starts and verifies Qwen2.5
-0.5B (about 491 MB). No GPU or Hugging Face login needed.
+app from Git as `ai`, pulls the pinned llama.cpp container image, and starts
+and verifies Qwen2.5 0.5B (about 491 MB) in a container. No GPU or Hugging Face
+login needed.
 
 For unattended setup, pass `--catalog FILE` to import or `--starter` to
 select the bundled catalog and back up your existing file.

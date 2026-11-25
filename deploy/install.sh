@@ -75,6 +75,8 @@ if "$systemd"; then
         die "systemd 254+ is required (systemd-run --expand-environment=no)."
     systemctl --user show-environment >/dev/null ||
         die "no user systemd manager; log in as ai after enabling linger, or use --no-systemd to stage files."
+    podman version >/dev/null 2>&1 ||
+        die "Podman is required and must run as ai; install podman and rootless support for ai (see docs/configuration.md)."
 fi
 
 # mkdir -p traverses existing parents without needing to own ~/.local.

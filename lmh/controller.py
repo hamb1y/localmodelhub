@@ -19,8 +19,9 @@ from pathlib import Path
 
 from .artifacts import ArtifactStore, ArtifactUnavailable
 from .catalog import CatalogError, load_catalog, validate_catalog
-from .engines import LLAMA_ENGINE_PORT, build_launch
+from .engines import CONTAINER_ADAPTERS, LLAMA_ENGINE_PORT, build_launch
 from .hardware import snapshot
+from .podman import Podman, image_digest, image_reference
 from .state import State
 from .supervisor import Supervisor
 from .telemetry import Telemetry
@@ -28,6 +29,7 @@ from .telemetry import Telemetry
 MIB = 1024 ** 2
 ACTIVE = {"running", "starting", "stopping", "ready", "unhealthy"}
 _PROBE_GPU = "GPU-00000000-0000-0000-0000-000000000000"
+_PROBE_IMAGE = "localhost/localmodelhub-probe@sha256:" + "0" * 64
 
 
 def _catalog_digest(config: dict) -> str | None:
@@ -43,11 +45,21 @@ def _check_config(config: dict, *, portable: bool = False) -> dict:
     """Validate adapter options without downloading, hashing, or executing runtimes."""
     for name, runtime in config["runtimes"].items():
         adapter = runtime["adapter"]
-        if adapter not in {"llama.cpp", "stable-diffusion.cpp", "native", "systemd"}:
+        if adapter not in CONTAINER_ADAPTERS | {"native", "systemd"}:
             raise CatalogError(f"{name}: unsupported adapter {adapter}")
-        if portable and (adapter not in {"llama.cpp", "stable-diffusion.cpp"}
-                         or set(runtime) - {"adapter", "version", "sha256", "options"}):
+        if portable and (adapter not in CONTAINER_ADAPTERS
+                         or set(runtime) - {"adapter", "version", "sha256", "options", "image",
+                                            "executable"}):
             raise CatalogError(f"{name}: imported runtimes must use portable typed adapters")
+        if portable and "image" in runtime:
+            try:
+                image_reference(runtime["image"])
+            except ValueError as exc:
+                raise CatalogError(f"{name}: {exc}") from None
+        if portable and "executable" in runtime:
+            executable = runtime["executable"]
+            if not isinstance(executable, str) or not Path(executable).is_absolute():
+                raise CatalogError(f"{name}: imported executables must be absolute in-container paths")
     sources = {}
     for name, artifact in config["artifacts"].items():
         source = artifact["source"]
@@ -80,6 +92,8 @@ def _check_config(config: dict, *, portable: bool = False) -> dict:
                     address = ipaddress.ip_address("127.0.0.1")
                 else:
                     address = ipaddress.ip_address(host)
+                if runtime["adapter"] in CONTAINER_ADAPTERS and not address.is_loopback:
+                    raise ValueError("container engines must bind to loopback")
                 if portable and not address.is_loopback:
                     raise ValueError("imported profiles must bind to loopback")
                 for key, bounds in (("resources", {"memory_high_mib": (1, 2097152),
@@ -114,8 +128,13 @@ def _check_config(config: dict, *, portable: bool = False) -> dict:
                 paths = {role: ([sources[key] for key in ids] if isinstance(ids, list) else sources[ids])
                          for role, ids in profile["artifacts"].items()}
                 selector = (profile.get("gpu", _PROBE_GPU) if profile["device"] == "gpu" else None)
-                build_launch({"executable": "/runtime/placeholder", **runtime}, profile, paths, gpu_id=selector,
-                             trusted_native=not portable)
+                probe = dict(runtime)
+                if runtime["adapter"] in CONTAINER_ADAPTERS:
+                    probe["image"] = runtime.get("image", _PROBE_IMAGE)
+                else:
+                    probe["executable"] = "/runtime/placeholder"
+                build_launch(probe, profile, paths, gpu_id=selector,
+                             trusted_native=not portable, identity=f"{model}\0{name}")
             except (ValueError, TypeError) as exc:
                 raise CatalogError(f"{model}/{name}: {exc}") from None
     return config
@@ -163,7 +182,7 @@ def _http_ready(url: str | None, timeout: float = 1.0) -> bool:
 class Controller:
     def __init__(self, catalog: Path, state_dir: Path, policy: dict | None = None, *,
                  driver=None, hardware=snapshot, artifact_store=None, boot_reader=boot_id,
-                 ready=_http_ready):
+                 ready=_http_ready, container=None):
         self.catalog_path = catalog
         self.state_dir = state_dir
         self.policy = policy or {}
@@ -171,6 +190,7 @@ class Controller:
         self.state.recover()
         self.telemetry = Telemetry(self.state.db)
         self.store = artifact_store or ArtifactStore(state_dir / "artifacts")
+        self.container = container or Podman()
         self.driver = driver or Supervisor(self.policy.get("adopted", {}))
         self.hardware = hardware
         self.ready = ready
@@ -240,13 +260,43 @@ class Controller:
     def _trusted_runtime(self, profile, runtime) -> dict:
         runtime = copy.deepcopy(runtime)
         rid = profile["runtime"]
-        if runtime["adapter"] == "systemd":
+        adapter = runtime["adapter"]
+        if adapter == "systemd":
             if self.policy.get("adopted", {}).get(runtime.get("unit")) != "allowlisted":
                 raise RuntimeError("This adopted system unit is read-only")
             return runtime
         approved = self.policy.get("runtimes", {}).get(rid)
-        if not approved:
-            raise RuntimeError(f"Runtime {rid} is not approved locally; add an executable to local policy")
+        if not isinstance(approved, dict) or not approved:
+            raise RuntimeError(f"Runtime {rid} is not approved locally; add its container image to local policy")
+        if approved.get("adapter") != adapter:
+            raise RuntimeError(f"Runtime adapter does not match approval for {rid}")
+        if runtime.get("version") and approved.get("version") != runtime["version"]:
+            raise RuntimeError(f"Runtime {rid} version does not match local approval")
+
+        if adapter in CONTAINER_ADAPTERS:
+            image = approved.get("image")
+            try:
+                image = image_reference(image)
+            except ValueError as exc:
+                raise RuntimeError(f"Runtime {rid} needs a digest-pinned image in local policy: {exc}") from None
+            if runtime.get("image") and image_reference(runtime["image"]) != image:
+                raise RuntimeError(f"Catalog image does not match the approved image for {rid}")
+            approved_digest = image_digest(image)
+            for source, declared in (("local policy", approved.get("sha256")),
+                                     ("catalog", runtime.get("sha256"))):
+                if declared and str(declared).lower() != approved_digest:
+                    raise RuntimeError(f"Runtime {rid} image digest does not match the {source}")
+            if "executable" in runtime:
+                try:
+                    runtime["executable"] = str(Path(runtime["executable"]))
+                except TypeError:
+                    raise RuntimeError(f"Runtime {rid} executable must be a path") from None
+                if not Path(runtime["executable"]).is_absolute():
+                    raise RuntimeError(f"Runtime {rid} executable must be an absolute in-container path")
+            runtime["image"] = image
+            return runtime
+
+        # Native is an explicitly reviewed host-only integration.
         raw_exe = approved.get("executable")
         if not isinstance(raw_exe, str) or not Path(raw_exe).is_absolute():
             raise RuntimeError(f"Runtime {rid} requires an absolute approved executable")
@@ -255,18 +305,14 @@ class Controller:
             raise RuntimeError(f"Runtime not executable as the service user: {exe}")
         if runtime.get("executable") and Path(runtime["executable"]).resolve() != exe:
             raise RuntimeError(f"Catalog executable does not match the approved executable for {rid}")
-        if approved.get("adapter") != runtime["adapter"]:
-            raise RuntimeError(f"Runtime adapter does not match approval for {rid}")
-        if runtime.get("version") and approved.get("version") != runtime["version"]:
-            raise RuntimeError(f"Runtime {rid} version does not match local approval")
         digest = approved.get("sha256")
         if digest:
             with exe.open("rb") as f:
                 if hashlib.file_digest(f, "sha256").hexdigest() != digest:
                     raise RuntimeError(f"Runtime checksum mismatch: {rid}")
-        advanced = runtime["adapter"] == "native" or any(
-            k in profile or k in runtime for k in
-            ("args", "argv", "extra_argv", "extra_args", "environment", "env", "cwd", "ld_library_path"))
+        advanced = any(k in profile or k in runtime for k in
+                       ("args", "argv", "extra_argv", "extra_args", "environment", "env",
+                        "cwd", "ld_library_path"))
         if advanced and not approved.get("allow_advanced"):
             raise RuntimeError(f"Runtime {rid} needs explicit approval for native arguments/environment")
         if runtime.get("sha256") and runtime["sha256"] != digest:
@@ -359,7 +405,10 @@ class Controller:
         files = self._files(profile, progress)
         launch = None if runtime["adapter"] == "systemd" else build_launch(
             runtime, profile, files, gpu_id=str(gpu["id"]) if gpu else None,
-            trusted_native=runtime["adapter"] == "native")
+            trusted_native=runtime["adapter"] == "native",
+            identity=f"{key[0]}\0{key[1]}", podman=self.container.executable)
+        if launch is not None and launch.container is not None:
+            self.container.ensure(launch.container.image, progress=progress)
         return profile, runtime, launch
 
     @staticmethod
@@ -404,7 +453,7 @@ class Controller:
         hw = self.hardware()
         self._coexistence(key, profile, self._gpu(profile, hw), hw)
         self._check_port(profile)
-        progress("Starting native service")
+        progress("Starting Podman container" if getattr(launch, "container", None) else "Starting native service")
         self.driver.start(*key, runtime, launch, profile)
         health = profile.get("health") or {}
         timeout = health.get("timeout_seconds", 120)
@@ -670,4 +719,9 @@ class Controller:
         runtime = self.config["runtimes"][profile["runtime"]]
         if runtime["adapter"] == "systemd":
             return self.policy.get("adopted", {}).get(runtime.get("unit")) == "allowlisted"
-        return profile["runtime"] in self.policy.get("runtimes", {})
+        approved = self.policy.get("runtimes", {}).get(profile["runtime"])
+        if not isinstance(approved, dict) or not approved:
+            return False
+        if runtime["adapter"] in CONTAINER_ADAPTERS:
+            return bool(approved.get("image"))
+        return bool(approved.get("executable"))

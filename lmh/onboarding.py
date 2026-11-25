@@ -220,8 +220,10 @@ def _preflight(status: dict, profile: dict, artifact: dict, data: Path, state: P
     cache = state / "artifacts"
     if not _cached(artifact, cache) and _free(cache) < artifact["size"]:
         raise RuntimeError(f"Free at least {(artifact['size'] + MIB - 1) // MIB} MiB on the filesystem for {cache}.")
-    if install and _free(data / "runtimes") < 160 * MIB:
-        raise RuntimeError(f"Free at least 160 MiB on the filesystem for {data / 'runtimes'}.")
+    if install:
+        storage = data.parent / "containers"
+        if _free(storage) < 1536 * MIB:
+            raise RuntimeError(f"Free at least 1536 MiB on the filesystem for the container image store at {storage}.")
 
 
 def _restart(state: Path) -> None:
@@ -348,7 +350,8 @@ def onboard(emit) -> int:
                             and job["action"] == "start" and job["state"] in {"queued", "running"}), None)
             if not pending:
                 stage = "host"
-                approved = profile["runtime"] in policy["runtimes"]
+                approved_entry = policy["runtimes"].get(profile["runtime"])
+                approved = isinstance(approved_entry, dict) and bool(approved_entry.get("image"))
                 if alternate_port and (not approved or not entry["controllable"]):
                     raise RuntimeError("The override panel must already have the starter CPU runtime approved and loaded; "
                                        "onboarding will not restart the default systemd service for LMH_ENDPOINT.")
@@ -356,7 +359,7 @@ def onboard(emit) -> int:
                 emit(stage, "ok", "CPU, available memory and disk checked.")
                 if not approved:
                     stage = "runtime"
-                    emit(stage, "working", "Downloading and verifying the approved llama.cpp CPU runtime.")
+                    emit(stage, "working", "Verifying rootless Podman and pulling the approved llama.cpp image.")
                     install_cpu_runtime(data, policy_path)
                 if not entry["controllable"]:
                     stage = "runtime"

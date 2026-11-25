@@ -1,12 +1,15 @@
-"""Translate local runtime configuration into process and probe specifications.
+"""Translate local runtime configuration into container and probe specifications.
 
-The controller resolves artifacts, checks executable integrity and runs the
-specification with shell=False. Pass Launch.env as the complete environment,
-not as overrides on the controller environment.
+Typed adapters (llama.cpp and stable-diffusion.cpp) run in rootless Podman
+containers approved by local policy; model files are bind-mounted read-only at
+their host paths. The controller resolves artifacts, checks the image and runs
+the specification with shell=False. Pass Launch.env as the complete environment
+of the Podman client, not as overrides on the controller environment.
 """
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import math
 import os
@@ -14,7 +17,22 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .podman import image_reference
+
 LLAMA_ENGINE_PORT = 18080
+CONTAINER_ADAPTERS = frozenset({"llama.cpp", "stable-diffusion.cpp"})
+
+
+@dataclass(frozen=True)
+class Container:
+    """The Podman command and the engine process it starts inside the image."""
+
+    image: str
+    name: str
+    engine_argv: tuple[str, ...]
+    mounts: tuple[tuple[str, str], ...]
+    gpu: str | None = None
+
 
 @dataclass(frozen=True)
 class Launch:
@@ -26,6 +44,7 @@ class Launch:
     version_argv: tuple[str, ...] | None = None
     # Capture both streams in the controller's log; no engine-managed log file.
     log_streams: tuple[str, ...] = ("stdout", "stderr")
+    container: Container | None = None
 
 
 _UUID = re.compile(
@@ -35,7 +54,7 @@ _UUID = re.compile(
 _ORDINAL = re.compile(r"0|[1-9][0-9]{0,8}")
 _LABEL = re.compile(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?")
 _SHARD = re.compile(r"(.+)-([0-9]{5})-of-([0-9]{5})\.gguf")
-_RUNTIME_FIELDS = {"adapter", "executable", "version", "sha256", "options", "cwd"}
+_RUNTIME_FIELDS = {"adapter", "executable", "image", "version", "sha256", "options", "cwd"}
 _LLAMA_INTS = {
     "threads": "--threads",
     "threads_batch": "--threads-batch",
@@ -383,6 +402,62 @@ def _native_args(raw: object, files: dict, host: str, port: int | None, gpu: str
             yield token
 
 
+def _container_name(identity: str) -> str:
+    label = re.sub(r"[^a-z0-9-]+", "-", identity.split("\0", 1)[0].lower()).strip("-")[:30] or "model"
+    suffix = hashlib.sha256(identity.encode()).hexdigest()[:12]
+    return f"lmh-{label}-{suffix}"
+
+
+def _mounts(files: dict) -> tuple[tuple[str, str], ...]:
+    """Map each engine-visible path to its verified host file.
+
+    Hugging Face cache entries are symlinks into a blob directory. The bind
+    source is the resolved file, while the destination keeps the path the
+    engine arguments name, so the container sees the model where the catalog
+    expects it.
+    """
+    mounts: dict[str, str] = {}
+    for paths in files.values():
+        for path in paths if isinstance(paths, list) else [paths]:
+            try:
+                source = str(Path(path).resolve())
+            except OSError:
+                raise ValueError("container artifact path cannot be resolved") from None
+            target = str(Path(path))
+            # Podman's --mount uses commas as field separators.
+            if any(char in source + target for char in ",\n\r\0"):
+                raise ValueError("container artifact paths cannot contain commas or line breaks")
+            if mounts.get(target, source) != source:
+                raise ValueError(f"container mount target conflicts with another artifact: {target}")
+            mounts[target] = source
+    return tuple(sorted(((source, target) for target, source in mounts.items()),
+                        key=lambda pair: pair[1]))
+
+
+def _podman_launch(
+    podman: str, runtime: dict, files: dict, gpu: str | None, identity: str, engine: list[str],
+) -> tuple[list[str], Container]:
+    image = image_reference(runtime.get("image"))
+    command = [str(_absolute(runtime["executable"], "executable"))] if "executable" in runtime else []
+    mounts = _mounts(files)
+    name = _container_name(identity)
+    argv = [
+        podman, "run", "--rm", "--replace", f"--name={name}", "--network=host",
+        "--pull=never", "--http-proxy=false",
+        # The host owns mounts and the image owns its root filesystem; keep
+        # SELinux relabeling off so read-only model binds work on enforcing hosts.
+        "--security-opt=no-new-privileges", "--security-opt=label=disable",
+    ]
+    if gpu:
+        # Rootless GPU access uses a CDI device, not the host's device files.
+        argv.append("--device=nvidia.com/gpu=all")
+    argv.extend(f"--mount=type=bind,src={source},dst={target},readonly=true"
+                for source, target in mounts)
+    argv.extend(("--env=CUDA_DEVICE_ORDER=PCI_BUS_ID", f"--env=CUDA_VISIBLE_DEVICES={gpu or ''}"))
+    argv.extend((image, *command, *engine))
+    return argv, Container(image, name, tuple([*command, *engine]), mounts, gpu)
+
+
 def build_launch(
     runtime: dict,
     profile: dict,
@@ -390,8 +465,16 @@ def build_launch(
     gpu_id: str | None = None,
     *,
     trusted_native: bool = False,
+    identity: str = "probe",
+    podman: str = "podman",
 ) -> Launch:
     """Build argv without executing the runtime or inspecting its binary.
+
+    Typed adapters require a digest-pinned ``runtime.image`` approved by the
+    controller; every artifact path is bind-mounted read-only at the same path
+    inside the container. ``runtime.executable``, if set, is an absolute
+    in-container command that overrides the image entrypoint. ``identity``
+    (model/profile) names the container deterministically.
 
     A controller-resolved gpu_id takes precedence over profile.gpu. Prefer a
     physical CUDA UUID; numeric selectors are CUDA PCI-bus-order ordinals.
@@ -410,17 +493,24 @@ def build_launch(
     adapter = _text(runtime.get("adapter"), "adapter")
     if adapter == "systemd":
         raise ValueError("systemd runtimes must be adopted by the controller")
-    if adapter not in {"llama.cpp", "stable-diffusion.cpp", "native"}:
+    if adapter not in CONTAINER_ADAPTERS | {"native"}:
         raise ValueError(f"unsupported runtime adapter: {adapter}")
     if adapter == "native" and trusted_native is not True:
         raise ValueError("native runtimes require controller approval of local config")
     _known(runtime, _RUNTIME_FIELDS | ({"argv", "env"} if adapter == "native" else set()),
            "runtime fields")
+    if adapter == "native" and "image" in runtime:
+        raise ValueError("native runtimes cannot use container images")
+    if adapter in CONTAINER_ADAPTERS and "cwd" in runtime:
+        raise ValueError("cwd is not supported for container runtimes")
     for key in ("args", "argv", "extra_argv", "extra_args", "env", "environment",
                 "cwd", "executable", "ld_library_path"):
         if key in profile:
             raise ValueError(f"{key} is not a profile field")
-    executable = str(_absolute(runtime.get("executable"), "executable"))
+    executable = (str(_absolute(runtime["executable"], "executable"))
+                  if "executable" in runtime else None)
+    if adapter == "native" and executable is None:
+        raise ValueError("native runtimes require an executable")
     cwd = _absolute(runtime["cwd"], "cwd") if "cwd" in runtime else None
     runtime_opts = _object(runtime.get("options", {}), "runtime options")
     profile_opts = _object(profile.get("options", {}), "profile options")
@@ -433,26 +523,31 @@ def build_launch(
     }[adapter]
     host, port, health_url, timeout = _network(profile, default_port, default_probe)
     env = {k: v for k, v in os.environ.items()
-           if k in {"PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "XDG_CACHE_HOME"}
+           if k in {"PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "XDG_CACHE_HOME",
+                    "XDG_RUNTIME_DIR"}
            or k.startswith("LC_")}
-    args = [executable]
-    version_argv = None
+    env.update(CUDA_VISIBLE_DEVICES=gpu or "", CUDA_DEVICE_ORDER="PCI_BUS_ID")
+    # Rootless Podman needs the per-user runtime directory even under env -i.
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    engine: list[str] = []
     if adapter == "native":
         _known(options, set(), "native options")
-        args.extend(_native_args(runtime.get("argv", []), files, host, port, gpu))
+        engine.append(executable)
+        engine.extend(_native_args(runtime.get("argv", []), files, host, port, gpu))
         for key, value in _object(runtime.get("env", {}), "env").items():
             if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", key):
                 raise ValueError("invalid native environment key")
             if key in {"CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"}:
                 raise ValueError(f"{key} is managed by the adapter")
             env[key] = _text(value, f"env.{key}", empty=True)
+        return Launch(tuple(engine), env, cwd, health_url, timeout, None)
+
+    image_reference(runtime.get("image"))
+    if adapter == "llama.cpp":
+        engine.extend(("--host", host, "--port", str(port)))
+        _llama(engine, options, files, gpu)
     else:
-        version_argv = (executable, "--version")
-        if adapter == "llama.cpp":
-            args.extend(("--host", host, "--port", str(port)))
-            _llama(args, options, files, gpu)
-        else:
-            args.extend(("--listen-ip", host, "--listen-port", str(port)))
-            _diffusion(args, options, files, gpu)
-    env.update(CUDA_VISIBLE_DEVICES=gpu or "", CUDA_DEVICE_ORDER="PCI_BUS_ID")
-    return Launch(tuple(args), env, cwd, health_url, timeout, version_argv)
+        engine.extend(("--listen-ip", host, "--listen-port", str(port)))
+        _diffusion(engine, options, files, gpu)
+    argv, container = _podman_launch(podman, runtime, files, gpu, identity, engine)
+    return Launch(tuple(argv), env, None, health_url, timeout, None, container=container)

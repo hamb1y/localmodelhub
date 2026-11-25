@@ -1,8 +1,9 @@
 # Working on LocalModelHub
 
-LocalModelHub manages **inference only**, natively on Linux. The daemon and its
-managed engines run under the dedicated `ai` account; the web UI is static at
-runtime. See [README.md](README.md) for the user workflow.
+LocalModelHub manages **inference only**, with each model engine in a rootless
+Podman container on Linux. The daemon and its managed containers run under the
+dedicated `ai` account; the web UI is static at runtime. See
+[README.md](README.md) for the user workflow.
 
 ## Lifecycle invariants
 

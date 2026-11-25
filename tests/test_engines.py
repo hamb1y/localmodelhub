@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -7,15 +8,22 @@ from lmh.engines import build_launch
 
 
 GPU = "GPU-a1234567-1234-1234-1234-0123456789ab"
-LLAMA = {"adapter": "llama.cpp", "executable": "/opt/llama-server"}
+LLAMA_IMAGE = "ghcr.io/example/llama.cpp:server@sha256:" + "a" * 64
+SD_IMAGE = "ghcr.io/example/stable-diffusion.cpp:cuda@sha256:" + "b" * 64
+LLAMA = {"adapter": "llama.cpp", "image": LLAMA_IMAGE}
 LLAMA_PIN = {**LLAMA, "version": "b12359"}
-SD = {"adapter": "stable-diffusion.cpp", "executable": "/opt/sd-server"}
+SD = {"adapter": "stable-diffusion.cpp", "image": SD_IMAGE}
 NATIVE = {"adapter": "native", "executable": "/opt/native"}
 MODEL = {"model": Path("/models/name with spaces.gguf")}
 
 
+def engine(launch) -> tuple[str, ...]:
+    assert launch.container is not None
+    return launch.container.engine_argv
+
+
 class EngineTests(unittest.TestCase):
-    def test_llama_cpu_enforces_device_and_drops_ambient_engine_overrides(self):
+    def test_llama_cpu_runs_in_podman_and_drops_ambient_engine_overrides(self):
         with patch.dict(os.environ, {
             "CUDA_VISIBLE_DEVICES": GPU, "LLAMA_ARG_N_GPU_LAYERS": "99",
             "MTMD_BACKEND_DEVICE": "CUDA0", "GGML_VK_VISIBLE_DEVICES": "0",
@@ -24,19 +32,35 @@ class EngineTests(unittest.TestCase):
                 LLAMA,
                 {"device": "cpu", "port": 8899, "options": {"mmap": False, "ctx_size": 4096}},
                 {**MODEL, "mmproj": Path("/models/mmproj.gguf")},
+                identity="qwen2.5-chat\0cpu",
             )
         self.assertEqual(launch.env["CUDA_VISIBLE_DEVICES"], "")
+        self.assertEqual(launch.env["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
         for key in ("LLAMA_ARG_N_GPU_LAYERS", "MTMD_BACKEND_DEVICE", "GGML_VK_VISIBLE_DEVICES"):
             self.assertNotIn(key, launch.env)
-        self.assertEqual(launch.argv, (
-            "/opt/llama-server", "--host", "127.0.0.1", "--port", "8899",
+            self.assertFalse(any(flag.startswith(f"--env={key}") for flag in launch.argv))
+        self.assertEqual(launch.container.image, LLAMA_IMAGE)
+        self.assertEqual(launch.container.name, launch.container.name.lower())
+        self.assertNotIn(" ", launch.container.name)
+        self.assertEqual(engine(launch), (
+            "--host", "127.0.0.1", "--port", "8899",
             "--device", "none", "--n-gpu-layers", "0", "--no-op-offload", "--no-kv-offload",
             "--model", str(MODEL["model"]), "--mmproj", "/models/mmproj.gguf",
             "--no-mmproj-offload", "--load-mode", "none", "--ctx-size", "4096",
         ))
+        self.assertIn(LLAMA_IMAGE, launch.argv)
+        self.assertEqual(launch.argv[launch.argv.index(LLAMA_IMAGE) + 1:], engine(launch))
+        self.assertIn("--network=host", launch.argv)
+        self.assertIn("--pull=never", launch.argv)
+        self.assertIn("--rm", launch.argv)
+        self.assertIn(f"--mount=type=bind,src={MODEL['model']},dst={MODEL['model']},readonly=true",
+                      launch.argv)
+        self.assertIn("--mount=type=bind,src=/models/mmproj.gguf,dst=/models/mmproj.gguf,readonly=true",
+                      launch.argv)
+        self.assertFalse(any("nvidia.com/gpu" in arg for arg in launch.argv))
         self.assertEqual(launch.health_url, "http://127.0.0.1:8899/health")
         self.assertEqual(launch.health_timeout, 120.0)
-        self.assertEqual(launch.version_argv, ("/opt/llama-server", "--version"))
+        self.assertIsNone(launch.version_argv)
         self.assertEqual(launch.log_streams, ("stdout", "stderr"))
 
     def test_llama_gpu_uses_resolved_uuid_and_only_one_visible_cuda_device(self):
@@ -46,12 +70,23 @@ class EngineTests(unittest.TestCase):
             MODEL, gpu_id=GPU,
         )
         self.assertEqual(launch.env["CUDA_VISIBLE_DEVICES"], GPU)
-        flags = dict(zip(launch.argv[1::2], launch.argv[2::2]))
+        self.assertIn("--device=nvidia.com/gpu=all", launch.argv)
+        self.assertIn(f"--env=CUDA_VISIBLE_DEVICES={GPU}", launch.argv)
+        flags = dict(zip(engine(launch)[::2], engine(launch)[1::2]))
         self.assertEqual(flags["--device"], "CUDA0")
         self.assertEqual(flags["--split-mode"], "none")
         self.assertEqual(flags["--n-gpu-layers"], "30")
         self.assertEqual(flags["--load-mode"], "mmap")
         self.assertEqual(flags["--threads"], "5")
+
+    def test_container_command_can_override_the_image_entrypoint(self):
+        launch = build_launch(
+            {**SD, "executable": "/sd-server"},
+            {"device": "cpu", "port": 1234},
+            {"diffusion_model": Path("/models/flux.gguf")},
+        )
+        self.assertEqual(engine(launch)[:3], ("/sd-server", "--listen-ip", "127.0.0.1"))
+        self.assertEqual(launch.argv[launch.argv.index(SD_IMAGE) + 1], "/sd-server")
 
     def test_gpu_selector_is_required_and_single(self):
         for selector in (None, "", "-1", "0,1", "GPU-a123", 0):
@@ -67,7 +102,7 @@ class EngineTests(unittest.TestCase):
         launch = build_launch(
             LLAMA, {"device": "cpu", "options": {"embedding": True, "pooling": "mean"}}, MODEL,
         )
-        self.assertEqual(launch.argv[-3:], ("--pooling", "mean", "--embedding"))
+        self.assertEqual(engine(launch)[-3:], ("--pooling", "mean", "--embedding"))
 
     def test_llama_b12359_cache_and_batch_options(self):
         launch = build_launch(
@@ -76,11 +111,12 @@ class EngineTests(unittest.TestCase):
                 "batch_size": 2048, "ubatch_size": 512, "threads_batch": 6,
             }}, MODEL,
         )
+        args = engine(launch)
         for flag, value in {
             "--cache-type-k": "q8_0", "--cache-type-v": "f8_e4m3", "--cache-ram": "0",
             "--batch-size": "2048", "--ubatch-size": "512", "--threads-batch": "6",
         }.items():
-            self.assertEqual(launch.argv[launch.argv.index(flag) + 1], value)
+            self.assertEqual(args[args.index(flag) + 1], value)
 
     def test_llama_fit_uses_auto_layers_only_when_not_fixed(self):
         for options, flags in (
@@ -91,8 +127,9 @@ class EngineTests(unittest.TestCase):
         ):
             with self.subTest(options=options):
                 launch = build_launch(LLAMA_PIN, {"device": "gpu", "options": options}, MODEL, GPU)
+                args = engine(launch)
                 for flag, value in flags.items():
-                    self.assertEqual(launch.argv[launch.argv.index(flag) + 1], value)
+                    self.assertEqual(args[args.index(flag) + 1], value)
 
     def test_llama_gpu_can_keep_vision_on_cpu_and_use_template_artifact(self):
         launch = build_launch(
@@ -100,13 +137,16 @@ class EngineTests(unittest.TestCase):
             {**MODEL, "mmproj": Path("/models/mmproj.gguf"),
              "chat_template": Path("/models/template with spaces.jinja")}, GPU,
         )
-        self.assertIn("--no-mmproj-offload", launch.argv)
-        self.assertNotIn("--mmproj-offload", launch.argv)
-        self.assertEqual(launch.argv[launch.argv.index("--jinja"):], (
+        args = engine(launch)
+        self.assertIn("--no-mmproj-offload", args)
+        self.assertNotIn("--mmproj-offload", args)
+        self.assertEqual(args[args.index("--jinja"):], (
             "--jinja", "--chat-template-file", "/models/template with spaces.jinja",
         ))
+        self.assertIn("--mount=type=bind,src=/models/template with spaces.jinja,"
+                      "dst=/models/template with spaces.jinja,readonly=true", launch.argv)
         disabled = build_launch(LLAMA_PIN, {"device": "cpu", "options": {"jinja": False}}, MODEL)
-        self.assertIn("--no-jinja", disabled.argv)
+        self.assertIn("--no-jinja", engine(disabled))
 
     def test_llama_b12359_draft_model_is_pinned_and_uses_current_flags(self):
         for device, gpu, backend, layers in (("cpu", None, "none", "0"), ("gpu", GPU, "CUDA0", "auto")):
@@ -117,13 +157,13 @@ class EngineTests(unittest.TestCase):
                     }},
                     {**MODEL, "draft_model": Path("/models/draft.gguf")}, gpu,
                 )
-                self.assertEqual(launch.argv[-12:], (
+                self.assertEqual(engine(launch)[-12:], (
                     "--spec-type", "draft-simple", "--spec-draft-model", "/models/draft.gguf",
                     "--spec-draft-device", backend, "--spec-draft-ngl", layers,
                     "--spec-draft-n-min", "1", "--spec-draft-n-max", "5",
                 ))
         ngram = build_launch(LLAMA_PIN, {"device": "cpu", "options": {"spec_type": "ngram-simple"}}, MODEL)
-        self.assertEqual(ngram.argv[-2:], ("--spec-type", "ngram-simple"))
+        self.assertEqual(engine(ngram)[-2:], ("--spec-type", "ngram-simple"))
 
     def test_llama_rejects_unsupported_settings_and_conflicting_roles(self):
         draft = {**MODEL, "draft_model": Path("/models/draft.gguf")}
@@ -149,11 +189,26 @@ class EngineTests(unittest.TestCase):
             with self.subTest(options=options, files=files), self.assertRaises(ValueError):
                 build_launch(LLAMA_PIN, {"device": "cpu", "options": options}, files)
 
+    def test_hf_symlink_mounts_the_resolved_blob_at_the_visible_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blob = root / "blobs" / "abc"
+            blob.parent.mkdir()
+            blob.write_bytes(b"weights")
+            visible = root / "snapshots" / "revision" / "model.gguf"
+            visible.parent.mkdir(parents=True)
+            visible.symlink_to(blob)
+            launch = build_launch(LLAMA, {"device": "cpu"}, {"model": visible})
+        self.assertEqual(launch.container.mounts, ((str(blob), str(visible)),))
+        self.assertIn(f"--mount=type=bind,src={blob},dst={visible},readonly=true", launch.argv)
+        self.assertEqual(engine(launch)[-1], str(visible))
+
     def test_llama_shards_require_full_ordered_set(self):
         first = Path("/models/gguf-00001-of-00002.gguf")
         second = Path("/models/gguf-00002-of-00002.gguf")
         launch = build_launch(LLAMA, {"device": "cpu"}, {"model": [first, second]})
-        self.assertEqual(launch.argv[-1], str(first))
+        self.assertEqual(engine(launch)[-1], str(first))
+        self.assertEqual(launch.container.mounts, ((str(first), str(first)), (str(second), str(second))))
         for invalid in (first, [second, first], [first, Path("/other") / second.name]):
             with self.assertRaisesRegex(ValueError, "complete, ordered"):
                 build_launch(LLAMA, {"device": "cpu"}, {"model": invalid})
@@ -170,11 +225,12 @@ class EngineTests(unittest.TestCase):
         ):
             with self.subTest(options=options):
                 launch = build_launch(SD, {"device": "gpu", "gpu": GPU, "options": options}, files)
-                self.assertIn(wanted, launch.argv)
-                self.assertNotIn(unwanted, launch.argv)
+                self.assertIn(wanted, engine(launch))
+                self.assertNotIn(unwanted, engine(launch))
                 self.assertEqual(launch.env["CUDA_VISIBLE_DEVICES"], GPU)
-                self.assertEqual(launch.argv, (
-                    "/opt/sd-server", "--listen-ip", "127.0.0.1", "--listen-port", "1234",
+                self.assertIn("--device=nvidia.com/gpu=all", launch.argv)
+                self.assertEqual(engine(launch), (
+                    "--listen-ip", "127.0.0.1", "--listen-port", "1234",
                     "--diffusion-model", "/models/flux.gguf", "--vae", "/models/vae.safetensors",
                     "--clip_l", "/models/clip.safetensors",
                     "--backend", "cuda0", "--auto-fit", "off", wanted,
@@ -198,23 +254,25 @@ class EngineTests(unittest.TestCase):
             }},
             files, gpu_id=GPU,
         )
+        args = engine(launch)
         for flag, value in {
             "--llm_vision": "/models/mmproj.gguf",
             "--sampling-method": "euler", "--sigmas": "qwen-image-2.1-turbo",
             "--flash-attn": "off,diffusion=on", "--width": "1024", "--height": "1024",
             "--threads": "8", "--max-pending-jobs": "2",
         }.items():
-            self.assertEqual(launch.argv[launch.argv.index(flag) + 1], value)
+            self.assertEqual(args[args.index(flag) + 1], value)
 
     def test_diffusion_cpu_pins_backend_even_with_gpu_build(self):
         launch = build_launch(
             SD, {"device": "cpu", "options": {"mmap": True, "cfg_scale": 1.5}}, MODEL,
         )
-        backend = launch.argv.index("--backend")
-        self.assertEqual(launch.argv[backend + 1], "cpu")
+        args = engine(launch)
+        backend = args.index("--backend")
+        self.assertEqual(args[backend + 1], "cpu")
         self.assertEqual(launch.env["CUDA_VISIBLE_DEVICES"], "")
-        self.assertNotIn("--offload-to-cpu", launch.argv)
-        self.assertIn("--mmap", launch.argv)
+        self.assertNotIn("--offload-to-cpu", args)
+        self.assertIn("--mmap", args)
 
     def test_typed_adapters_reject_unknown_or_incompatible_options(self):
         for runtime, opts in (
@@ -239,12 +297,26 @@ class EngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported runtime fields"):
             build_launch({**LLAMA, "env": {}}, {"device": "cpu"}, MODEL)
 
+    def test_container_runtime_requires_a_digest_pinned_image(self):
+        for runtime in (
+            {"adapter": "llama.cpp"},
+            {"adapter": "llama.cpp", "image": "ghcr.io/example/llama:server"},
+            {"adapter": "llama.cpp", "image": "ghcr.io/example/llama@sha256:" + "a" * 63},
+            {"adapter": "llama.cpp", "image": "ghcr.io/Example/llama@sha256:" + "a" * 64},
+            {**LLAMA, "cwd": "/opt"},
+            {"adapter": "native", "executable": "/opt/native", "image": LLAMA_IMAGE},
+        ):
+            with self.subTest(runtime=runtime), self.assertRaises(ValueError):
+                build_launch(runtime, {"device": "cpu"}, MODEL,
+                             trusted_native=runtime["adapter"] == "native")
+
     def test_invalid_artifact_roles_and_paths_are_not_silently_ignored(self):
         for runtime, files in (
             (LLAMA, {"checkpoint": MODEL["model"]}),
             (LLAMA, {"model": Path("relative.gguf")}),
             (SD, {**MODEL, "diffusion_model": Path("/models/flux.gguf")}),
             (SD, {"model": [Path("/models/a"), Path("/models/b")]}),
+            (LLAMA, {"model": Path("/models/bad,path.gguf")}),
         ):
             with self.subTest(files=files), self.assertRaises(ValueError):
                 build_launch(runtime, {"device": "cpu"}, files)
@@ -267,6 +339,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(launch.cwd, Path("/opt"))
         self.assertEqual(launch.health_url, "http://127.0.0.1:9999/ready")
         self.assertIsNone(launch.version_argv)
+        self.assertIsNone(launch.container)
 
     def test_native_does_not_allow_configured_visibility_override(self):
         with self.assertRaisesRegex(ValueError, "managed by the adapter"):
@@ -298,7 +371,7 @@ class EngineTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 build_launch(LLAMA, {"device": "cpu", **fields}, MODEL)
 
-    def test_systemd_and_relative_executables_are_not_launched(self):
+    def test_systemd_and_relative_commands_are_not_launched(self):
         with self.assertRaisesRegex(ValueError, "adopted by the controller"):
             build_launch({"adapter": "systemd", "unit": "foo.service"}, {"device": "cpu"}, {})
         with self.assertRaisesRegex(ValueError, "executable must be an absolute path"):

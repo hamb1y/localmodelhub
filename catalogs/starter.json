@@ -3,11 +3,12 @@
   "runtimes": {
     "llama-cpu": {
       "adapter": "llama.cpp",
-      "version": "b12359"
+      "image": "ghcr.io/ggml-org/llama.cpp:server@sha256:b0cd5490eefff30b40dcd47f7249a7d7211136908f73fe440a2a86b35a22b23b"
     },
     "sd-cuda": {
       "adapter": "stable-diffusion.cpp",
-      "version": "532d2c15c430a785a712b2d94281f04e733008a4"
+      "image": "ghcr.io/leejet/stable-diffusion.cpp:master-cuda@sha256:4fd8b723a56c06c421cd299febb393ff9563d448eaa5f713cd98c2017f417542",
+      "executable": "/sd-server"
     }
   },
   "artifacts": {

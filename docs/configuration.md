@@ -26,8 +26,8 @@ systemctl --user show-environment >/dev/null
 
 ## Manual source install (advanced)
 
-The host needs systemd 254+, Git, a C toolchain, Python 3.11+, Bash, `curl`,
-coreutils and `flock`.
+The host needs systemd 254+, Podman with rootless subordinate UID/GID ranges,
+Git, a C toolchain, Python 3.11+, Bash, `curl`, coreutils and `flock`.
 Managed runtime units use `systemd-run --expand-environment=no` so systemd
 does not expand model arguments. Install Python's `venv`/`ensurepip` support
 (for example `python3-venv` on Debian/Ubuntu), or install `uv` alongside
@@ -88,32 +88,51 @@ substitute for reviewing a catalog or trusting its publisher.
 
 ## Runtime policy
 
-Local policy controls which native executables may run. Approve only trusted
-binaries, matching the runtime ID and adapter from the catalog. Create
-`~/.config/localmodelhub/policy.json` as `ai` with mode `0600` (`umask 077`
-before creating it). For example:
+Local policy approves the container image each runtime may execute. Approve
+only trusted, digest-pinned images, matching the runtime ID and adapter from
+the catalog. Create `~/.config/localmodelhub/policy.json` as `ai` with mode
+`0600` (`umask 077` before creating it). For example:
 
 ```json
 {
   "runtimes": {
     "llama-cpu": {
       "adapter": "llama.cpp",
-      "executable": "/opt/llama.cpp/bin/llama-server",
-      "version": "b12359"
+      "image": "ghcr.io/ggml-org/llama.cpp:server@sha256:b0cd5490eefff30b40dcd47f7249a7d7211136908f73fe440a2a86b35a22b23b"
+    },
+    "sd-cuda": {
+      "adapter": "stable-diffusion.cpp",
+      "image": "ghcr.io/leejet/stable-diffusion.cpp:master-cuda@sha256:4fd8b723a56c06c421cd299febb393ff9563d448eaa5f713cd98c2017f417542",
+      "executable": "/sd-server"
     }
   }
 }
 ```
 
-Use the actual absolute path, and match any version or checksum pinned by the
-catalog. Restart the service to load manually edited policy. The normal
-bootstrap handles CPU runtime approval and activation itself.
+An `image` must include an `@sha256:<64 hex>` digest; tags are not enough.
+The digest in the catalog, when present, must match this approval. On an
+explicit Start the controller pulls the pinned image if it is missing, then
+runs it with `--pull=never`, so a later tag move cannot change the engine.
+`executable` is an optional absolute command inside the container; omit it to
+use the image entrypoint. Restart the service to load manually edited policy.
+The normal bootstrap handles Podman setup and CPU image approval itself.
+An older policy entry that approves only a host `executable` no longer
+authorizes a typed adapter; replace it with the pinned image. The explicit
+`native` and `systemd` adapters keep their existing host-only approval rules.
 
-For the starter NVIDIA image profile, install your NVIDIA drivers and a
-compatible CUDA build of `sd-server` separately. Approve it under `sd-cuda`
-with adapter `stable-diffusion.cpp`, the actual absolute executable path, and
-the version pinned in `catalogs/starter.json`. Make sure `ai` can access the
-GPU and that enough VRAM and model storage are available.
+Rootless Podman must work for `ai`: the account needs `/etc/subuid` and
+`/etc/subgid` ranges plus `newuidmap`/`newgidmap` (`uidmap` on Debian and
+Arch). Container storage is `~ai/.local/share/containers`. The one-step
+bootstrap installs these; for a manual setup run `podman info` as `ai` before
+starting a model.
+
+GPU profiles use rootless NVIDIA CDI: install the NVIDIA driver and
+`nvidia-container-toolkit`, generate a CDI spec (`nvidia-ctk cdi generate
+--output=/etc/cdi/nvidia.yaml`), and verify `podman run --device
+nvidia.com/gpu=all … nvidia-smi` works as `ai`. The starter's `sd-cuda`
+profile pulls the pinned stable-diffusion.cpp CUDA image; make sure enough
+VRAM and model storage are available. Without a working CDI spec, start CPU
+profiles only.
 
 Locally configured native commands and adopted systemd units are not portable
 imports. Adopted system units are read-only by default; an `"allowlisted"`
@@ -122,7 +141,9 @@ needed, requires a separately reviewed, root-owned `ai-service-control`
 wrapper, sudoers entries restricted to exact units and actions, and an
 administrator-approved user-service drop-in allowing privilege elevation.
 Never grant unrestricted `sudo` or `systemctl` rights. This is not part of the
-normal install. Managed inference units retain `NoNewPrivileges=true`.
+normal install. Managed Podman units keep `NoNewPrivileges=no` only inside the
+transient unit so rootless `newuidmap` can run; the panel service itself keeps
+`NoNewPrivileges=true`.
 
 ## Credentials and remote access
 
@@ -225,15 +246,22 @@ or TUI, or through an authorized webhook.
 
 The `ram_mib` and `vram_mib` settings are estimates. GPU coexistence requires
 measured free VRAM and known budgets for other managed GPU profiles on the
-same card. Use a CUDA UUID to select a specific GPU. The optional systemd
-limits `resources.memory_high_mib`, `resources.memory_max_mib`, and
+same card. Use a CUDA UUID to select a specific GPU. The optional transient
+unit limits `resources.memory_high_mib`, `resources.memory_max_mib`, and
 `resources.swap_max_mib` are separate from those estimates. Rates are based
 on runtime-reported counters or measurements and remain unavailable if
 there is no usable measurement.
 
+Each running profile is a container named `lmh-<model>-<hash>` inside a
+transient user unit. `podman ps --filter name=lmh-` lists them, and
+`lmh logs` reads the unit journal, which includes the container's output.
+If a start fails, check that the pinned image is pullable and, for GPU
+profiles, that the CDI spec is visible to `ai`.
+
 Use `lmh doctor`, `lmh jobs`, `lmh stats`, and `lmh logs --help` to diagnose
 issues. If the panel is unreachable, check the user-service journal and
-verify that `ai` can read the catalog and access the runtime and model files.
+verify that `ai` can read the catalog and access the runtime image and model
+files.
 
 ```bash
 systemctl --user status localmodelhub.service
@@ -252,7 +280,10 @@ once to switch it to source installs. Rerun it after a Python minor-version
 upgrade to rebuild the environment.
 
 Stop running profiles explicitly before taking the panel offline if you
-also want inference stopped: managed models have separate user units.
+also want inference stopped: managed models have separate user units, each
+running its own Podman container. Uninstall stops those units and their
+containers; pulled images stay in `ai`'s Podman storage and can be removed
+with `podman rmi` when no longer needed.
 Run `lmh uninstall` as `ai` to uninstall. Review `lmh uninstall --help` and
 back up anything you want to keep before using `lmh uninstall --purge`.
 Do not manually delete or unlink the active release while services are running.

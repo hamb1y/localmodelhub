@@ -91,36 +91,44 @@ python_ready() (
 need_python=false
 need_git=false
 need_cc=false
+need_podman=false
 python_ready || need_python=true
 command -v git >/dev/null || need_git=true
 command -v cc >/dev/null || need_cc=true
-if "$need_python" || "$need_git" || "$need_cc"; then
-    command -v sudo >/dev/null || die 'Git, a C toolchain, and Python 3.11+ with venv are required; rerun as an administrator with sudo.'
+command -v podman >/dev/null || need_podman=true
+if "$need_python" || "$need_git" || "$need_cc" || "$need_podman"; then
+    command -v sudo >/dev/null || die 'Git, a C toolchain, Python 3.11+ with venv, and Podman are required; rerun as an administrator with sudo.'
     packages=()
     if command -v apt-get >/dev/null; then
         if "$need_python"; then packages+=(python3 python3-venv); fi
         if "$need_git"; then packages+=(git); fi
         if "$need_cc"; then packages+=(build-essential); fi
+        if "$need_podman"; then packages+=(podman uidmap); fi
         sudo -- apt-get update &&
             sudo -- apt-get install -y "${packages[@]}" ||
-            die 'apt could not install the build prerequisites.'
+            die 'apt could not install the prerequisites.'
     elif command -v dnf >/dev/null; then
         if "$need_python"; then packages+=(python3 python3-pip); fi
         if "$need_git"; then packages+=(git); fi
         if "$need_cc"; then packages+=(gcc glibc-devel); fi
-        sudo -- dnf install -y "${packages[@]}" || die 'dnf could not install the build prerequisites.'
+        if "$need_podman"; then packages+=(podman shadow-utils); fi
+        sudo -- dnf install -y "${packages[@]}" || die 'dnf could not install the prerequisites.'
     elif command -v pacman >/dev/null; then
         if "$need_python"; then packages+=(python python-pip); fi
         if "$need_git"; then packages+=(git); fi
         if "$need_cc"; then packages+=(base-devel); fi
+        if "$need_podman"; then packages+=(podman uidmap); fi
         sudo -- pacman -S --needed --noconfirm "${packages[@]}" ||
-            die 'pacman could not install the build prerequisites.'
+            die 'pacman could not install the prerequisites.'
     else
-        die 'Install Git, a C toolchain, and Python 3.11+ with venv; no supported package manager was found.'
+        die 'Install Git, a C toolchain, Python 3.11+ with venv, and Podman; no supported package manager was found.'
     fi
-    python_ready && command -v git >/dev/null && command -v cc >/dev/null ||
-        die 'The distro packages did not provide Git, cc, and Python 3.11+ with venv.'
+    python_ready && command -v git >/dev/null && command -v cc >/dev/null &&
+        command -v podman >/dev/null ||
+        die 'The distro packages did not provide Git, cc, Python 3.11+ with venv, and Podman.'
 fi
+command -v newuidmap >/dev/null && command -v newgidmap >/dev/null ||
+    die 'Rootless Podman requires newuidmap/newgidmap (the uidmap package on Debian and Arch).'
 
 if ! entry=$(getent passwd ai); then
     command -v sudo >/dev/null || die 'sudo is required to create the ai account.'
@@ -130,6 +138,17 @@ fi
 IFS=: read -r account _ ai_uid _ _ ai_home _ <<< "$entry"
 [[ $account == ai && $ai_uid =~ ^[1-9][0-9]*$ && $ai_home == /* && $ai_home != / ]] ||
     die 'the ai account must be non-root and have a registered absolute home directory.'
+
+subordinate=()
+[[ -n $(getent subuid ai || true) ]] || subordinate+=(--add-subuids 100000-165535)
+[[ -n $(getent subgid ai || true) ]] || subordinate+=(--add-subgids 100000-165535)
+if ((${#subordinate[@]})); then
+    [[ $EUID != "$ai_uid" ]] ||
+        die 'ask an administrator to add subordinate UID/GID ranges for ai (usermod --add-subuids --add-subgids).'
+    command -v sudo >/dev/null || die 'sudo is required to add subordinate UID/GID ranges for ai.'
+    sudo -- usermod "${subordinate[@]}" ai ||
+        die 'could not add subordinate UID/GID ranges for ai; rootless Podman cannot start.'
+fi
 
 if [[ $(loginctl show-user ai --property=Linger --value 2>/dev/null || true) != yes ]]; then
     [[ $EUID != "$ai_uid" ]] ||

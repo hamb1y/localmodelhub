@@ -58,7 +58,10 @@ class OnboardingTests(unittest.TestCase):
 
     def approve(self, *_):
         policy = json.loads(self.policy.read_text()) if self.policy.exists() else {}
-        policy.setdefault("runtimes", {})["llama-cpu"] = {"custom": "approval"}
+        policy.setdefault("runtimes", {})["llama-cpu"] = {
+            "adapter": "llama.cpp",
+            "image": "ghcr.io/example/llama.cpp:server@sha256:" + "a" * 64,
+        }
         self.policy.write_text(json.dumps(policy))
 
     def status(self, state="stopped", *, approved=False, jobs=(), starter=True):
@@ -273,6 +276,9 @@ class BootstrapHandoffTests(unittest.TestCase):
         self.exec_script("loginctl", "echo yes")
         self.exec_script("id", "echo ai")
         self.exec_script("curl", "exit 0")
+        self.exec_script("podman", "exit 0")
+        self.exec_script("newuidmap", "exit 0")
+        self.exec_script("newgidmap", "exit 0")
         self.exec_script("sudo", 'echo "unexpected package provisioning" >&2; exit 98')
         native = self.home / ".local/share/localmodelhub/current/bin"
         native.mkdir(parents=True)

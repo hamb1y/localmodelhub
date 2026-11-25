@@ -113,10 +113,23 @@ Runtime, CPU/GPU, and quantization are deployment choices, not model types.
 ## Runtimes, artifacts, and profiles
 
 **Runtimes.** A runtime requires an `adapter`, normally `llama.cpp` or
-`stable-diffusion.cpp`. A definition can pin `version` or `sha256` and set
-adapter `options`. The local [runtime policy](configuration.md#runtime-policy)
-approves the executable separately. `native` and `systemd` are for explicitly
-reviewed host-only integrations, not portable catalogs.
+`stable-diffusion.cpp`. Those typed adapters always run in a rootless Podman
+container, so the runtime (or its local policy approval) needs a digest-pinned
+`image`, for example `ghcr.io/ggml-org/llama.cpp:server@sha256:<64 hex>`.
+Mutable tags alone are rejected. `executable` is optional and names an absolute command *inside* the
+container (for images whose entrypoint is not the engine server, such as
+`/sd-server`); it is never a host binary. A definition can also set adapter
+`options` and pin `version` or `sha256` for policy matching. The local
+[runtime policy](configuration.md#runtime-policy) approves the image separately.
+`native` and `systemd` are for explicitly reviewed host-only integrations, not
+portable catalogs.
+
+Model files are bind-mounted read-only into the container at their host
+absolute paths, so engine arguments and artifact roles stay the same. A
+container uses the host network namespace and must bind a loopback `host`; the
+controller and readiness probe reach it at `127.0.0.1:<port>` exactly as
+before. GPU profiles receive one NVIDIA CDI device and the selected
+`CUDA_VISIBLE_DEVICES` value.
 
 **Artifacts.** Each artifact requires a `source`. A Hugging Face source is
 `{"kind":"hf","repo":"org/name","revision":"<40-hex-commit>","file":"path/to/file.gguf"}`.
@@ -124,7 +137,7 @@ Use the full Git commit, not a branch or tag. A local source is
 `{"kind":"local","path":"/absolute/path/to/file.gguf"}`; `ai` needs read access.
 `size` is bytes and `hashes.sha256`/`hashes.blake3` are 64 hex digits. Pin
 both when known and never invent hashes. See `catalogs/starter.json` for
-working pins. Do not put tokens or executable approvals in a shared file.
+working pins. Do not put tokens or local image approvals in a shared file.
 
 **Profiles.** A profile requires `runtime` (an existing runtime ID),
 `device` (`cpu` or `gpu`), and `artifacts` (an object mapping adapter roles
@@ -141,7 +154,7 @@ for its embedding mode. See the starter for a diffusion profile.
 | `options` | Typed profile-specific runtime settings. |
 | `health` | Local `path` and `timeout_seconds` for readiness. |
 | `metrics_path` | Local engine metrics endpoint, if available. |
-| `resources` | Optional systemd limits: `memory_high_mib`, `memory_max_mib`, `swap_max_mib`. |
+| `resources` | Optional cgroup limits for the transient unit and its container: `memory_high_mib`, `memory_max_mib`, `swap_max_mib`. |
 | `lifecycle` | Optional `stop_timeout_seconds`. |
 
 ## Unified inference

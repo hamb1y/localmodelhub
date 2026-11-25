@@ -1,9 +1,10 @@
-"""The native systemd user supervisor; no shell and no privilege escalation."""
+"""The systemd user supervisor for Podman containers and native units; no shell."""
 
 from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -76,10 +77,24 @@ class Supervisor:
         # A loaded failed transient unit must be reset before reusing its name.
         if self.observe(model, profile, runtime)["state"] == "failed":
             self._checked(["systemctl", "--user", "reset-failed", unit])
-        if not launch or not Path(launch.argv[0]).is_absolute():
-            raise SupervisorError("Native launch requires an absolute executable")
-        argv = ["systemd-run", "--user", "--expand-environment=no", "--collect", f"--unit={unit}", "--property=Type=exec",
-                "--property=KillMode=control-group", "--property=NoNewPrivileges=yes"]
+        if not launch:
+            raise SupervisorError("Native launch requires a specification")
+        container = getattr(launch, "container", None)
+        program = launch.argv[0]
+        if not Path(program).is_absolute():
+            program = shutil.which(program) or ""
+        if not program or not Path(program).is_absolute():
+            raise SupervisorError("Podman is required to start this model" if container
+                                  else "Native launch requires an absolute executable")
+        argv = ["systemd-run", "--user", "--expand-environment=no", "--collect", f"--unit={unit}",
+                "--property=Type=exec", "--property=KillMode=control-group"]
+        if container:
+            # Rootless Podman needs to manage the unit's cgroup and may use the
+            # setuid newuidmap/newgidmap helpers; keep that confined to this
+            # transient unit and never to the panel service itself.
+            argv.extend(("--property=Delegate=yes", "--property=NoNewPrivileges=no"))
+        else:
+            argv.append("--property=NoNewPrivileges=yes")
         if launch.cwd:
             argv.append(f"--working-directory={launch.cwd}")
         resources = options.get("resources", {})

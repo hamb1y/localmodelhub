@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "runtimes": {
-    "native-llama": {
+    "container-llama": {
       "adapter": "llama.cpp",
-      "executable": "/absolute/path/to/llama-server"
+      "image": "ghcr.io/ggml-org/llama.cpp:server@sha256:b0cd5490eefff30b40dcd47f7249a7d7211136908f73fe440a2a86b35a22b23b"
     }
   },
   "artifacts": {
@@ -29,12 +29,12 @@
       "default_profile": "local-cpu",
       "profiles": {
         "local-cpu": {
-          "runtime": "native-llama",
+          "runtime": "container-llama",
           "device": "cpu",
           "artifacts": { "model": "local-weights" }
         },
         "hf-cpu": {
-          "runtime": "native-llama",
+          "runtime": "container-llama",
           "device": "cpu",
           "artifacts": { "model": "hf-weights" }
         }

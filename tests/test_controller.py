@@ -5,8 +5,11 @@ import fcntl
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from lmh.controller import Controller, MIB
+
+IMAGE = "ghcr.io/example/llama.cpp:server@sha256:" + "a" * 64
 
 
 def _gpu(free=16000):
@@ -49,6 +52,41 @@ def catalog(boot=()):
                           "default_profile": "default", "profiles": {"default": options}}
     return {"schema_version": 1, "runtimes": runtimes, "artifacts": {}, "models": profiles,
             "boot": [{"model": key, "profile": "default"} for key in boot]}
+
+
+class FakeContainer:
+    executable = "/usr/bin/podman"
+
+    def __init__(self):
+        self.ensured = []
+
+    def ensure(self, reference, progress=lambda _: None):
+        self.ensured.append(reference)
+        return reference
+
+
+class FakeStore:
+    def resolve(self, artifact, download=False):
+        return Path("/models/model.gguf")
+
+
+def container_catalog(*, image=IMAGE):
+    return {
+        "schema_version": 1,
+        "runtimes": {"llama": {"adapter": "llama.cpp", "image": image}},
+        "artifacts": {"weights": {"source": {"kind": "local", "path": "/models/model.gguf"}}},
+        "models": {
+            "chat": {
+                "name": "Chat",
+                "io": [{"input": ["text"], "output": "text"}],
+                "profiles": {
+                    "cpu": {"runtime": "llama", "device": "cpu", "artifacts": {"model": "weights"},
+                            "host": "127.0.0.1", "port": 38123},
+                },
+            },
+        },
+        "boot": [],
+    }
 
 
 class ControllerTest(unittest.TestCase):
@@ -154,3 +192,41 @@ class ControllerTest(unittest.TestCase):
                 fcntl.flock(update, fcntl.LOCK_EX | fcntl.LOCK_NB)
             c.shutdown()
             fcntl.flock(update, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def container_controller(self, *, image=IMAGE, approved=IMAGE):
+        self.cfg.write_text(json.dumps(container_catalog(image=image)))
+        self.container = FakeContainer()
+        policy = {"runtimes": ({"llama": {"adapter": "llama.cpp", "image": approved}}
+                               if approved is not None else {})}
+        controller = Controller(
+            self.cfg, self.root / "state", policy, driver=self.driver,
+            hardware=lambda: _gpu(16000), artifact_store=FakeStore(),
+            container=self.container, boot_reader=lambda: "boot1", ready=lambda url: True,
+        )
+        self.addCleanup(controller.shutdown)
+        controller.reconcile()
+        return controller
+
+    def test_container_start_ensures_image_and_mounts_model(self):
+        c = self.container_controller()
+        self.assertEqual(c.boot["state"], "complete")
+        with patch.object(Controller, "_check_port"):
+            profile, runtime, launch = c._prepare(("chat", "cpu"))
+        self.assertEqual(self.container.ensured, [IMAGE])
+        self.assertEqual(launch.container.image, IMAGE)
+        self.assertEqual(launch.container.engine_argv[-2:], ("--model", "/models/model.gguf"))
+        self.assertEqual(launch.container.mounts, (("/models/model.gguf", "/models/model.gguf"),))
+        self.assertIn("--network=host", launch.argv)
+        self.assertEqual(c.status()["models"][0]["profiles"][0]["state"], "stopped")
+
+    def test_container_runtime_requires_an_approved_pinned_image(self):
+        for image, approved, message in (
+            (IMAGE, None, "not approved locally"),
+            (IMAGE, "ghcr.io/example/llama.cpp:server@sha256:" + "b" * 64, "does not match"),
+            (IMAGE, "ghcr.io/example/llama.cpp:server", "digest-pinned"),
+        ):
+            with self.subTest(approved=approved):
+                c = self.container_controller(image=image, approved=approved)
+                profile, runtime = c._profile(("chat", "cpu"))
+                with self.assertRaisesRegex(RuntimeError, message):
+                    c._trusted_runtime(profile, runtime)
