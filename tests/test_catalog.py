@@ -43,15 +43,25 @@ class CatalogTest(unittest.TestCase):
 
     def test_model_types_reject_missing_unknown_repeated_and_flattened_pairs(self):
         for invalid in (None, [], [{"input": "text", "output": "text"}],
-                        [{"input": ["embedding"], "output": "text"}],
+                        [{"input": ["Text"], "output": "text"}],
                         [{"input": ["text", "text"], "output": "text"}],
-                        [{"input": ["text"], "output": "vision"}],
+                        [{"input": ["text"], "output": "text image"}],
                         [{"input": ["text", "image"], "output": "text"},
                          {"input": ["image", "text"], "output": "text"}]):
             raw = sample()
             raw["models"]["m"]["io"] = invalid
             with self.subTest(io=invalid), self.assertRaisesRegex(CatalogError, r"models\.m\.io"):
                 validate_catalog(raw)
+
+    def test_custom_media_types_are_declarative(self):
+        raw = sample()
+        raw["models"]["m"]["io"] = [{"input": ["text", "document"], "output": "json"},
+                                    {"input": ["audio"], "output": "text"}]
+        normalized = validate_catalog(raw)
+        self.assertEqual(normalized["models"]["m"]["io"], [
+            {"input": ["audio"], "output": "text"},
+            {"input": ["document", "text"], "output": "json"},
+        ])
 
     def test_normalizes_without_mutation_and_preserves_single_and_sharded_roles(self):
         raw = sample()

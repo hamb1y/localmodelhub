@@ -39,6 +39,7 @@ _INLINE_MEDIA = re.compile(r"data:(image|audio|video)/[A-Za-z0-9.+-]+;base64,[A-
 _SAFE_MEDIA = re.compile(r"(?:application|audio|image|text|video)/[A-Za-z0-9.+-]+")
 _CHAT_PARTS = {"text": "text", "image_url": "image", "input_audio": "audio", "video_url": "video"}
 _BASE64 = re.compile(r"[A-Za-z0-9+/=\r\n]+")
+_MISSING = object()
 _IMAGE_JSON_FIELDS = {
     "model", "prompt", "n", "size", "quality", "style", "response_format",
     "output_format", "output_compression", "background", "moderation", "user",
@@ -177,7 +178,8 @@ def parse_upload(media, raw, path):
 def encode_upload(fields, alias):
     boundary = "lmh-" + uuid.uuid4().hex
     parts = []
-    for name, filename, media, data in [("model", None, None, alias.encode()), *fields]:
+    model = [] if alias is None else [("model", None, None, alias.encode())]
+    for name, filename, media, data in [*model, *fields]:
         header = f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"'
         if filename:
             header += f'; filename="{filename}"\r\nContent-Type: {media}'
@@ -186,8 +188,19 @@ def encode_upload(fields, alias):
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
-def upstream_alias(target, model):
-    """Single-model engines may advertise a filename or a different alias."""
+def upstream_alias(target, model, upstream=None, path=None):
+    """Pick the model ID the engine should see for this request.
+
+    ``upstream`` is the serving profile's route map: ``"*"`` is the default and
+    a path key overrides it. A string is sent as the engine's model ID; ``None``
+    omits the field for engines that infer their model. Without a map, fall back
+    to the engine's advertised IDs (single-model engines may advertise a
+    filename or a different alias).
+    """
+    if upstream is not None:
+        picked = upstream.get(path, upstream.get("*", _MISSING))
+        if picked is not _MISSING:
+            return picked
     conn = http.client.HTTPConnection(*target, timeout=5)
     try:
         conn.request("GET", "/v1/models")

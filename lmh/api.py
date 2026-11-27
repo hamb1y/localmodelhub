@@ -537,10 +537,12 @@ class _Handler(BaseHTTPRequestHandler):
             request_type, raw = self._read_body(inference.REQUEST_LIMIT, "application/json")
             body = self._parse_body(raw)
             model = inference.model_id(body.get("model"))
+            model = controller.resolve_model(model)
             inputs, output = inference.json_io(path, body)
         else:
             request_type, raw = self._read_body(inference.REQUEST_LIMIT, "multipart/form-data")
             model, fields = inference.parse_upload(request_type, raw, path)
+            model = controller.resolve_model(model)
             inputs, output = inference.UPLOAD_ROUTES[path]
             if path == "/v1/videos" and any(name == "input_reference" for name, *_ in fields):
                 inputs = inputs | {"image"}
@@ -556,12 +558,15 @@ class _Handler(BaseHTTPRequestHandler):
             raise inference.InferenceError(503, "Model is not ready. Start it explicitly in LocalModelHub.",
                                            "model_not_ready")
         self._begin_capture(model, path, request_type, raw)
-        alias = inference.upstream_alias(target, model)
+        alias = inference.upstream_alias(target, model, controller.upstream_map(model, target), path)
         if body is None:
             payload, media = inference.encode_upload(fields, alias)
         else:
             media = "application/json"
-            payload = json.dumps({**body, "model": alias}, allow_nan=False).encode()
+            forwarded = {key: value for key, value in body.items() if key != "model"}
+            if alias is not None:
+                forwarded["model"] = alias
+            payload = json.dumps(forwarded, allow_nan=False).encode()
         inference.relay(self, target, path, payload, media, model)
 
     def _video(self, path):

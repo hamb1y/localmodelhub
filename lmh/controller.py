@@ -9,6 +9,7 @@ import ipaddress
 import json
 import os
 import queue
+import re
 import socket
 import sqlite3
 import tempfile
@@ -28,6 +29,15 @@ from .telemetry import Telemetry
 
 MIB = 1024 ** 2
 ACTIVE = {"running", "starting", "stopping", "ready", "unhealthy"}
+_PROFILE_FIELDS = {
+    "runtime", "artifacts", "device", "gpu", "vram_mib", "ram_mib", "host", "port",
+    "options", "health", "resources", "lifecycle", "metrics_path", "metrics_port",
+    "metrics", "upstream",
+}
+_METRIC_COUNTERS = frozenset({"prompt_tokens", "generation_tokens", "cached_tokens",
+                              "requests", "errors"})
+_METRIC_NAME = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*")
+_UPSTREAM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _PROBE_GPU = "GPU-00000000-0000-0000-0000-000000000000"
 _PROBE_IMAGE = "localhost/localmodelhub-probe@sha256:" + "0" * 64
 
@@ -81,8 +91,7 @@ def _check_config(config: dict, *, portable: bool = False) -> dict:
                         profile.setdefault("port", default_port)
                     if isinstance(profile.setdefault("health", {}), dict):
                         profile["health"].setdefault("path", probe)
-                if set(profile) - {"runtime", "artifacts", "device", "gpu", "vram_mib", "ram_mib", "host", "port",
-                                   "options", "health", "resources", "lifecycle", "metrics_path"}:
+                if set(profile) - _PROFILE_FIELDS:
                     raise ValueError("unsupported profile fields")
                 for key, minimum, maximum in (("port", 1, 65535), ("vram_mib", 1, 1048576),
                                               ("ram_mib", 1, 2097152)):
@@ -123,11 +132,41 @@ def _check_config(config: dict, *, portable: bool = False) -> dict:
                         if not limit and (not isinstance(value, str) or not value.startswith("/")
                                           or value.startswith("//") or any(x.isspace() for x in value)):
                             raise ValueError(f"{key}.{option} must be a local HTTP path")
+                if "metrics_port" in profile:
+                    value = profile["metrics_port"]
+                    if type(value) is not int or not 1 <= value <= 65535:
+                        raise ValueError("metrics_port must be an integer in [1, 65535]")
                 if "metrics_path" in profile:
                     value = profile["metrics_path"]
                     if (not isinstance(value, str) or not value.startswith("/") or value.startswith("//")
                             or any(x.isspace() for x in value) or "port" not in profile):
                         raise ValueError("metrics_path requires a local HTTP path and an explicit port")
+                if "metrics" in profile:
+                    if "metrics_path" not in profile:
+                        raise ValueError("metrics requires metrics_path")
+                    counters = profile["metrics"]
+                    if not isinstance(counters, dict) or not counters or counters.keys() - _METRIC_COUNTERS:
+                        raise ValueError(
+                            "metrics must map at least one of "
+                            f"{', '.join(sorted(_METRIC_COUNTERS))} to a Prometheus metric name")
+                    for counter, metric in counters.items():
+                        if not isinstance(metric, str) or not _METRIC_NAME.fullmatch(metric):
+                            raise ValueError(f"metrics.{counter} must be a Prometheus metric name")
+                    if len(set(counters.values())) != len(counters):
+                        raise ValueError("metrics must not read one Prometheus metric as two counters")
+                if "upstream" in profile:
+                    upstream = profile["upstream"]
+                    if not isinstance(upstream, dict) or not upstream:
+                        raise ValueError("upstream must be a nonempty object")
+                    for route, upstream_id in upstream.items():
+                        if route != "*" and (
+                                not isinstance(route, str) or not route.startswith("/")
+                                or route.startswith("//") or any(x.isspace() for x in route)):
+                            raise ValueError("upstream keys must be '*' or a local HTTP path")
+                        if upstream_id is not None and (
+                                not isinstance(upstream_id, str) or len(upstream_id) > 256
+                                or not _UPSTREAM_ID.fullmatch(upstream_id)):
+                            raise ValueError("upstream values must be an identifier or null")
                 resources = profile.get("resources", {})
                 if resources.get("memory_high_mib", 0) > resources.get("memory_max_mib", 2097152):
                     raise ValueError("memory_high_mib cannot exceed memory_max_mib")
@@ -678,7 +717,8 @@ class Controller:
                     for key in self._all():
                         spec, _ = self._profile(key)
                         if (path := spec.get("metrics_path")) and self._observe(key)["state"] == "running":
-                            self.telemetry.sample(*key, spec["port"], path)
+                            self.telemetry.sample(*key, spec.get("metrics_port") or spec["port"], path,
+                                                  spec.get("metrics"))
             except (OSError, ValueError, RuntimeError, sqlite3.Error):
                 pass
             self.halt.wait(20)
@@ -725,6 +765,33 @@ class Controller:
 
     def inference_types(self) -> dict:
         return {model: spec["io"] for model, spec in self.config["models"].items()} if self.config_valid else {}
+
+    def resolve_model(self, requested: str) -> str:
+        """Map an engine's own model ID back to the catalog entry declaring it.
+
+        A profile's ``upstream`` map can name the IDs its engine speaks, and
+        clients can then send that ID directly (a hard-coded ``whisper-1``, an
+        engine alias). The catalog model ID always wins over an alias.
+        """
+        types = self.inference_types()
+        if requested in types:
+            return requested
+        for model in sorted(types):
+            for profile in self.config["models"][model]["profiles"].values():
+                ids = (profile.get("upstream") or {}).values()
+                if requested in {value for value in ids if value is not None}:
+                    return model
+        return requested
+
+    def upstream_map(self, model: str, target: tuple[str, int]) -> dict | None:
+        """Return the upstream model map of the profile serving ``model``."""
+        spec = self.config["models"].get(model)
+        if spec is None:
+            return None
+        for profile in spec["profiles"].values():
+            if profile.get("port") == target[1]:
+                return profile.get("upstream")
+        return None
 
     def status(self):
         models = []

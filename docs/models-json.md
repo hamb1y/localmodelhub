@@ -88,10 +88,16 @@ its profiles. Profiles of a model serve the same declared pairs.
 
 Each `io` entry is one exact combination: a nonempty list of distinct
 `input` types and one `output` type. Input order does not matter. Do not
-repeat a pair. The accepted types are:
+repeat a pair. A type is a lowercase token of letters, digits, `_`, `-` and
+`.`, up to 32 characters. The hub's built-in routes produce and understand
+this core set:
 
 - **Input:** `text`, `image`, `audio`, `video`.
 - **Output:** `text`, `image`, `audio`, `video`, `decision`, `embedding`.
+
+Any other token (`document`, `json`, `3d`, …) is declarative metadata: it is
+shown in the panel and `GET /v1/models`, but no built-in route produces or
+accepts it, so leave those entries out unless a client reads them.
 
 For example, these two pairs declare text-to-image generation and image
 editing with a text prompt, but do not declare image-only input:
@@ -223,8 +229,53 @@ for its embedding mode. See the starter for a diffusion profile.
 | `options` | Typed profile-specific runtime settings. |
 | `health` | Local `path` and `timeout_seconds` for readiness. |
 | `metrics_path` | Local engine metrics endpoint, if available. |
+| `metrics_port` | Port of a metrics listener separate from the engine port. Defaults to `port`. |
+| `metrics` | Counter names for token, request and error telemetry (see below). |
 | `resources` | Optional cgroup limits for the transient unit and its container: `memory_high_mib`, `memory_max_mib`, `swap_max_mib`, `cpu_count`. |
 | `lifecycle` | Optional `stop_timeout_seconds`. |
+| `upstream` | Per-route engine model IDs (see below). |
+
+### Engine model IDs
+
+LocalModelHub normally forwards its own model ID after checking what the
+engine advertises on `/v1/models`. A profile's `upstream` map overrides that
+per route. `"*"` sets the default, a route key overrides it, and `null` omits
+the `model` field for engines that infer their model.
+
+```json
+"upstream": {
+  "*": "hamb1y-swift-1.5-27b-abl-16g",
+  "/v1/audio/transcriptions": "qwen3-asr-1.7b",
+  "/v1/audio/translations": "qwen3-asr-1.7b"
+}
+```
+
+This keeps one engine that serves several model IDs (a chat model plus a
+speech model on the same port) as one catalog entry. Mapped values are also
+accepted as request model IDs, so a client can send `whisper-1` when a profile
+declares it. An undeclared ID still returns 404.
+
+### Metrics counters
+
+`metrics` maps hub counters to the engine's Prometheus metric names. Without
+it the hub reads llama.cpp's defaults. Names may appear with several label
+sets; values are summed. Unreported counters stay `null`, never zero.
+
+```json
+"metrics_path": "/metrics",
+"metrics_port": 9464,
+"metrics": {
+  "prompt_tokens": "ignis_prompt_tokens_total",
+  "generation_tokens": "ignis_generated_tokens_total",
+  "cached_tokens": "ignis_prefix_reused_tokens_total",
+  "requests": "ignis_requests_accepted_total",
+  "errors": "ignis_requests_rejected_total"
+}
+```
+
+`prompt_tokens`, `generation_tokens` and `cached_tokens` drive the token
+panel; `requests` and `errors` add totals, a rate and an error rate. `errors`
+should count requests the engine rejected, not client cancellations.
 
 ## Unified inference
 

@@ -234,6 +234,31 @@ class ControllerTest(unittest.TestCase):
         self.assertIn("--network=host", launch.argv)
         self.assertEqual(c.status()["models"][0]["profiles"][0]["state"], "stopped")
 
+    def test_profile_metrics_and_upstream_maps_are_validated(self):
+        raw = container_catalog()
+        profile = raw["models"]["chat"]["profiles"]["cpu"]
+        profile.update(metrics_path="/metrics", metrics_port=9464,
+                       metrics={"generation_tokens": "ignis_generated_tokens_total",
+                                "requests": "ignis_requests_accepted_total"},
+                       upstream={"*": "engine-model", "/v1/audio/transcriptions": None})
+        checked = _check_config(validate_catalog(raw))
+        self.assertEqual(checked["models"]["chat"]["profiles"]["cpu"]["metrics_port"], 9464)
+        for change in ({"metrics_port": 0},
+                       {"metrics": {}},
+                       {"metrics": {"tokens": "ignis_tokens"}},
+                       {"metrics": {"requests": "bad metric"}},
+                       {"metrics": {"requests": "a_total", "errors": "a_total"}},
+                       {"upstream": {}},
+                       {"upstream": {"model": "x"}},
+                       {"upstream": {"*": "bad id"}}):
+            invalid = copy.deepcopy(raw)
+            invalid["models"]["chat"]["profiles"]["cpu"].update(change)
+            with self.subTest(change=change), self.assertRaises(CatalogError):
+                _check_config(validate_catalog(invalid))
+        del raw["models"]["chat"]["profiles"]["cpu"]["metrics_path"]
+        with self.assertRaisesRegex(CatalogError, "metrics requires metrics_path"):
+            _check_config(validate_catalog(raw))
+
     def test_container_catalog_requires_port_and_defaults_to_health(self):
         raw = container_catalog()
         raw["runtimes"]["llama"] = {

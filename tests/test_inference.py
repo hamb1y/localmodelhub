@@ -164,6 +164,30 @@ class InferenceTests(unittest.TestCase):
                     self.assertEqual(self.request(f"/v1/videos/{job}")[1]["id"], job)
                     self.assertEqual(self.request(f"/v1/videos/{job}/content"), (200, b"\x00mp4"))
 
+    def test_upstream_map_rewrites_ids_and_accepts_declared_aliases(self):
+        profile = self.controller.config["models"]["audio"]["profiles"]["local"]
+        profile["upstream"] = {"*": "engine-alias", "/v1/audio/transcriptions": "speech-model"}
+
+        def transcribe(model):
+            raw, media = encode_upload([("file", "foo.wav", "audio/wav", b"wave")], model)
+            return self.request("/v1/audio/transcriptions", raw, headers={"Content-Type": media})
+
+        self.assertEqual(transcribe("audio")[0], 200)
+        alias, _ = parse_upload(self.engine.last_request[2]["Content-Type"],
+                                self.engine.last_request[1], "/v1/audio/transcriptions")
+        self.assertEqual(alias, "speech-model")
+        # The engine's own ID is accepted and routed to the catalog entry that declares it.
+        self.assertEqual(transcribe("speech-model")[0], 200)
+        alias, _ = parse_upload(self.engine.last_request[2]["Content-Type"],
+                                self.engine.last_request[1], "/v1/audio/transcriptions")
+        self.assertEqual(alias, "speech-model")
+        self.assertEqual(transcribe("undeclared")[0], 404)
+        # A null mapping forwards no model field at all.
+        self.controller.config["models"]["embed"]["profiles"]["local"]["upstream"] = {
+            "/v1/embeddings": None}
+        self.assertEqual(self.request("/v1/embeddings", {"model": "embed", "input": "test"})[0], 200)
+        self.assertNotIn("model", json.loads(self.engine.last_request[1]))
+
     def test_profanity_is_scoped_to_model_and_stream_fragments(self):
         self.assertEqual(self.request("/v1/chat/completions", self.chat())[0], 200)
         status, raw = self.request("/v1/chat/completions", self.chat(stream=True))

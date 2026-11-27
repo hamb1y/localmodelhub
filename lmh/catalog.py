@@ -19,6 +19,11 @@ _REPO_PART = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 INPUT_TYPES = frozenset({"text", "image", "audio", "video"})
 OUTPUT_TYPES = INPUT_TYPES | {"decision", "embedding"}
+# Declared types are not a closed list: engines keep inventing media kinds
+# (documents, structured records, 3D assets). The built-in routes still only
+# produce the core types above, so a custom type is declarative metadata until
+# a route reports it.
+_TYPE = re.compile(r"[a-z][a-z0-9_.-]{0,31}")
 
 
 def _object(value: object, where: str) -> dict:
@@ -115,11 +120,15 @@ def _model_io(raw: object, where: str) -> list[dict]:
         _only(pair, {"input", "output"}, location)
         inputs, output = pair.get("input"), pair.get("output")
         if (not isinstance(inputs, list) or not inputs
-                or any(not isinstance(kind, str) or kind not in INPUT_TYPES for kind in inputs)
+                or any(not isinstance(kind, str) or not _TYPE.fullmatch(kind) for kind in inputs)
                 or len(set(inputs)) != len(inputs)):
-            raise CatalogError(f"{location}.input must list distinct types: {', '.join(sorted(INPUT_TYPES))}")
-        if not isinstance(output, str) or output not in OUTPUT_TYPES:
-            raise CatalogError(f"{location}.output must be one of: {', '.join(sorted(OUTPUT_TYPES))}")
+            raise CatalogError(
+                f"{location}.input must list distinct lowercase type tokens "
+                f"(letters, digits, '_', '-', '.', up to 32 characters)")
+        if not isinstance(output, str) or not _TYPE.fullmatch(output):
+            raise CatalogError(
+                f"{location}.output must be a lowercase type token "
+                f"(letters, digits, '_', '-', '.', up to 32 characters)")
         key = tuple(sorted(inputs)), output
         if key in seen:
             raise CatalogError(f"{location} repeats an input/output pair")

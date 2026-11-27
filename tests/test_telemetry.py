@@ -101,6 +101,35 @@ class TelemetryTest(unittest.TestCase):
         with closing(sqlite3.connect(self.db)) as con:
             self.assertEqual(con.execute("SELECT timestamp FROM samples").fetchall(), [(12.0,)])
 
+    def test_configured_counter_names_and_request_totals(self):
+        names = {"generation_tokens": "ignis_generated_tokens_total",
+                 "requests": "ignis_requests_accepted_total",
+                 "errors": "ignis_requests_rejected_total"}
+
+        def payload(generation, requests, errors):
+            return (f"ignis_generated_tokens_total {generation}\n"
+                    f"ignis_requests_accepted_total {requests}\n"
+                    f"ignis_requests_rejected_total {errors}\n").encode()
+
+        routes = {"/metrics": (200, {}, payload(100, 10, 1))}
+        with metrics_server(routes) as (port, _):
+            self.telemetry.sample("ignis", "cuda", port, "/metrics", names)
+            self.now += 10
+            routes["/metrics"] = (200, {}, payload(160, 14, 2))
+            self.telemetry.sample("ignis", "cuda", port, "/metrics", names)
+
+        stats = self.telemetry.stats()
+        profile, = stats["profiles"]
+        self.assertEqual((profile["generation_tokens"], profile["prompt_tokens"], profile["tokens"]),
+                         (60, None, None))
+        self.assertEqual((profile["requests"], profile["errors"]), (4, 1))
+        self.assertAlmostEqual(profile["inference_error_rate"], 1 / 4)
+        self.assertEqual(profile["requests_per_second"], 0.4)
+        self.assertEqual(stats["metrics"]["requests"], 4)
+        self.assertEqual(stats["metrics"]["requests_per_second"], 0.4)
+        self.assertAlmostEqual(stats["metrics"]["inference_error_rate"], 1 / 4)
+        self.assertIsNone(stats["metrics"]["tokens"])
+
     def test_counter_drop_and_changed_endpoint(self):
         routes = {"/metrics": (200, {}, payload(9, 10)), "/other": (200, {}, payload(200, 300))}
         with metrics_server(routes) as (port, _):
