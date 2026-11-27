@@ -234,6 +234,25 @@ class ControllerTest(unittest.TestCase):
         self.assertIn("--network=host", launch.argv)
         self.assertEqual(c.status()["models"][0]["profiles"][0]["state"], "stopped")
 
+    def test_model_aliases_cannot_collide(self):
+        raw = container_catalog()
+        raw["models"]["chat"]["profiles"]["cpu"]["upstream"] = {"*": "engine-model"}
+        raw["models"]["chat"]["aliases"] = ["legacy-chat"]
+        self.assertEqual(_check_config(validate_catalog(raw))["models"]["chat"]["aliases"], ["legacy-chat"])
+        invalid = copy.deepcopy(raw)
+        invalid["models"]["chat"]["aliases"] = ["chat"]
+        with self.assertRaisesRegex(CatalogError, "another model's ID"):
+            _check_config(validate_catalog(invalid))
+        second = copy.deepcopy(raw["models"]["chat"])
+        second["profiles"]["cpu"]["port"] = 38124
+        second["aliases"] = ["legacy-chat"]
+        raw["models"]["other"] = second
+        with self.assertRaisesRegex(CatalogError, "already chat's"):
+            _check_config(validate_catalog(raw))
+        second["aliases"] = ["engine-model"]
+        with self.assertRaisesRegex(CatalogError, "another model's upstream"):
+            _check_config(validate_catalog(raw))
+
     def test_profile_metrics_and_upstream_maps_are_validated(self):
         raw = container_catalog()
         profile = raw["models"]["chat"]["profiles"]["cpu"]

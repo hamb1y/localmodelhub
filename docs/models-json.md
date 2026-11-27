@@ -86,6 +86,13 @@ Every entry under `models` requires a display `name`, a nonempty `io` list, and
 a nonempty `profiles` object. An optional `default_profile` must name one of
 its profiles. Profiles of a model serve the same declared pairs.
 
+A model may also declare `aliases`: client-facing IDs that resolve to it. This
+lets a hard-coded client ID (a vendor default, a previous catalog ID) reach the
+model without editing the client. An alias may not equal a model ID or another
+model's `upstream` value, and the profile's `upstream` map still decides what
+the engine sees. Aliases are listed in `GET /v1/models`; they are not separate
+models and do not appear in the panel's model list.
+
 Each `io` entry is one exact combination: a nonempty list of distinct
 `input` types and one `output` type. Input order does not matter. Do not
 repeat a pair. A type is a lowercase token of letters, digits, `_`, `-` and

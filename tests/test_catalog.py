@@ -53,6 +53,16 @@ class CatalogTest(unittest.TestCase):
             with self.subTest(io=invalid), self.assertRaisesRegex(CatalogError, r"models\.m\.io"):
                 validate_catalog(raw)
 
+    def test_model_aliases_are_identifiers_and_unique(self):
+        raw = sample()
+        raw["models"]["m"]["aliases"] = ["legacy-id"]
+        self.assertEqual(validate_catalog(raw)["models"]["m"]["aliases"], ["legacy-id"])
+        for invalid in ("legacy-id", ["legacy-id", "legacy-id"], ["bad id"], [1]):
+            bad = sample()
+            bad["models"]["m"]["aliases"] = invalid
+            with self.subTest(aliases=invalid), self.assertRaisesRegex(CatalogError, r"models\.m\.aliases"):
+                validate_catalog(bad)
+
     def test_custom_media_types_are_declarative(self):
         raw = sample()
         raw["models"]["m"]["io"] = [{"input": ["text", "document"], "output": "json"},

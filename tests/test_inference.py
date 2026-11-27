@@ -164,6 +164,17 @@ class InferenceTests(unittest.TestCase):
                     self.assertEqual(self.request(f"/v1/videos/{job}")[1]["id"], job)
                     self.assertEqual(self.request(f"/v1/videos/{job}/content"), (200, b"\x00mp4"))
 
+    def test_model_alias_routes_to_the_model(self):
+        self.controller.config["models"]["chat"]["aliases"] = ["legacy-chat"]
+        code, response = self.request("/v1/chat/completions", self.chat("legacy-chat"))
+        self.assertEqual((code, response["model"]), (200, "chat"))
+        self.assertEqual(json.loads(self.engine.last_request[1])["model"], "engine-alias")
+        status, listing = self.request("/v1/models")
+        self.assertEqual(status, 200)
+        entry, = [item for item in listing["data"] if item["id"] == "chat"]
+        self.assertEqual(entry["aliases"], ["legacy-chat"])
+        self.assertEqual(self.request("/v1/models/legacy-chat")[1]["id"], "chat")
+
     def test_upstream_map_rewrites_ids_and_accepts_declared_aliases(self):
         profile = self.controller.config["models"]["audio"]["profiles"]["local"]
         profile["upstream"] = {"*": "engine-alias", "/v1/audio/transcriptions": "speech-model"}

@@ -522,14 +522,17 @@ class _Handler(BaseHTTPRequestHandler):
             models = controller.inference_types()
             if path == "/v1/models":
                 self._json(200, {"object": "list", "data": [
-                    self._model_descriptor(model, pairs) for model, pairs in sorted(models.items())
+                    self._model_descriptor(model, pairs, controller.model_aliases(model))
+                    for model, pairs in sorted(models.items())
                     if self._engine_target(model)
                 ]})
             else:
                 model = inference.model_id(path.removeprefix("/v1/models/"))
+                model = controller.resolve_model(model)
                 if model not in models or not self._engine_target(model):
                     raise inference.InferenceError(404, "Model is not available.", "model_not_found")
-                self._json(200, self._model_descriptor(model, models[model]))
+                self._json(200, self._model_descriptor(model, models[model],
+                                                       controller.model_aliases(model)))
             return
         if self.command != "POST" or path not in inference.JSON_ROUTES.keys() | inference.UPLOAD_ROUTES.keys():
             raise inference.InferenceError(404, "Inference endpoint not supported.", "endpoint_not_found")
@@ -626,8 +629,11 @@ class _Handler(BaseHTTPRequestHandler):
         return self.server.controller.inference_target(model, exclude_ports=ports)
 
     @staticmethod
-    def _model_descriptor(model, pairs):
-        return {"id": model, "object": "model", "created": 0, "owned_by": "localmodelhub", "io": pairs}
+    def _model_descriptor(model, pairs, aliases=()):
+        descriptor = {"id": model, "object": "model", "created": 0, "owned_by": "localmodelhub", "io": pairs}
+        if aliases:
+            descriptor["aliases"] = list(aliases)
+        return descriptor
 
     def _api(self, path, query):
         if path == "/api/health" and self.command in {"GET", "HEAD"}:

@@ -53,6 +53,22 @@ def _catalog_digest(config: dict) -> str | None:
 
 def _check_config(config: dict, *, portable: bool = False) -> dict:
     """Validate adapter options without downloading, hashing, or executing runtimes."""
+    aliases = {}
+    upstream_ids = {}
+    for model, spec in config["models"].items():
+        for profile in spec["profiles"].values():
+            for value in (profile.get("upstream") or {}).values():
+                if value is not None:
+                    upstream_ids.setdefault(value, set()).add(model)
+    for model, spec in config["models"].items():
+        for alias in spec.get("aliases", []):
+            if alias in config["models"]:
+                raise CatalogError(f"{model}: alias {alias} is another model's ID")
+            if alias in aliases:
+                raise CatalogError(f"{model}: alias {alias} is already {aliases[alias]}'s")
+            if upstream_ids.get(alias, {model}) != {model}:
+                raise CatalogError(f"{model}: alias {alias} is another model's upstream ID")
+            aliases[alias] = model
     for name, runtime in config["runtimes"].items():
         adapter = runtime["adapter"]
         if adapter not in CONTAINER_ADAPTERS | {"native", "systemd"}:
@@ -777,11 +793,17 @@ class Controller:
         if requested in types:
             return requested
         for model in sorted(types):
+            if requested in (self.config["models"][model].get("aliases") or []):
+                return model
             for profile in self.config["models"][model]["profiles"].values():
                 ids = (profile.get("upstream") or {}).values()
                 if requested in {value for value in ids if value is not None}:
                     return model
         return requested
+
+    def model_aliases(self, model: str) -> list:
+        spec = self.config["models"].get(model)
+        return list(spec.get("aliases", [])) if spec else []
 
     def upstream_map(self, model: str, target: tuple[str, int]) -> dict | None:
         """Return the upstream model map of the profile serving ``model``."""

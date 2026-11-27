@@ -160,8 +160,17 @@ def validate_catalog(raw: object) -> dict:
     models = {}
     for name, model in _named(obj.get("models"), "models"):
         where = f"models.{name}"
-        _only(model, {"name", "io", "profiles", "default_profile"}, where)
+        _only(model, {"name", "io", "profiles", "default_profile", "aliases"}, where)
         label = _text(model.get("name"), f"{where}.name")
+        aliases = model.get("aliases", [])
+        if not isinstance(aliases, list):
+            raise CatalogError(f"{where}.aliases must be an array of identifiers")
+        normalized_aliases = []
+        for index, alias in enumerate(aliases):
+            alias_id = _identifier(alias, f"{where}.aliases[{index}]")
+            if alias_id in normalized_aliases:
+                raise CatalogError(f"{where}.aliases must not repeat an identifier")
+            normalized_aliases.append(alias_id)
         model_io = _model_io(model.get("io"), f"{where}.io")
         profiles = {}
         for profile_id, profile in _named(model.get("profiles"), f"{where}.profiles"):
@@ -185,6 +194,8 @@ def validate_catalog(raw: object) -> dict:
         if not profiles:
             raise CatalogError(f"{where}.profiles must not be empty")
         models[name] = {"name": label, "io": model_io, "profiles": profiles}
+        if normalized_aliases:
+            models[name]["aliases"] = normalized_aliases
         if "default_profile" in model:
             models[name]["default_profile"] = _reference(
                 model["default_profile"], profiles, f"{where}.default_profile"
